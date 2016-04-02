@@ -6,10 +6,11 @@ file(GLOB inc
 	LASlib/inc
 	LASzip/src
     
-    amf-cpp
-    amf-cpp/types
+	amf-cpp
+	amf-cpp/types
+  
+	nanoflann
     
-    nanoflann
 )
 
 file(GLOB src
@@ -23,9 +24,11 @@ file(GLOB src
 	b64/cdecode.c
 	b64/cencode.c
     
-    amf-cpp/*.cpp
+ 	amf-cpp/*.cpp
+
+	nanoflann/nanoflann.hpp
     
-    nanoflann/nanoflann.hpp
+    7zip/*.c
 )
 
 list(REMOVE_ITEM src

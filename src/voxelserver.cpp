@@ -14,6 +14,9 @@
 #include <mutex>
 #include <list>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #pragma warning(push)
 #pragma warning(disable:4996)
 #pragma warning(disable:4267)
@@ -48,6 +51,16 @@
 
 #include <Eigen/Core>
 
+
+#ifdef _WIN32
+#include <direct.h>
+#endif
+
+
+#include "7zip/LzmaLib.h"
+#include "7zip/LzmaEnc.h"
+
+
 #define NO_CACHE \
     "Cache-Control: no-cache, no-store, must-revalidate\r\n" \
     "Pragma: no-cache\r\n" \
@@ -75,6 +88,12 @@ int exitNow = 0;
 
 #define vassert(x, format, ...) if (!x) { printf(format, __VA_ARGS__); __debugbreak(); }
 
+static const char *gkotPathFormat = "W:/gis/arso/laz/gkot/b_35/D96TM/TM_%d_%d.laz";
+static const char *nanoflannAllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.kdz";
+static const char *nflz4AllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.lz4";
+static const char *nanoflannGroundPathFormat = "W:/gis/arso/nanoflann/otr/b_35/D96TM/TM_%d_%d.kdtree";
+
+typedef int pcln;
 
 enum Classification
 {
@@ -114,6 +133,162 @@ enum BlockType
     BLOCK_DOUBLE_STONE_SLAB = 43,
     
 };
+
+
+
+/*
+#define BUF_SIZE (16*1024)
+#define LZ4_HEADER_SIZE 19
+#define LZ4_FOOTER_SIZE 4
+
+static const LZ4F_preferences_t lz4_preferences = {
+    { LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
+    0,   // compression level
+    0,   // autoflush
+    { 0, 0, 0, 0 },  // reserved, must be set to 0
+};
+
+static int lz4_compress_file(FILE *in, FILE *out, size_t *size_in, size_t *size_out) {
+    LZ4F_errorCode_t r;
+    LZ4F_compressionContext_t ctx;
+    char *src, *buf = NULL;
+    size_t size, n, k, count_in = 0, count_out, offset = 0, frame_size;
+
+    r = LZ4F_createCompressionContext(&ctx, LZ4F_VERSION);
+    if (LZ4F_isError(r)) {
+        printf("Failed to create context: error %zu", r);
+        return 1;
+    }
+    r = 1;
+
+    src = (char*)malloc(BUF_SIZE);
+    if (!src) {
+        printf("Not enough memory");
+        goto cleanup;
+    }
+
+    frame_size = LZ4F_compressBound(BUF_SIZE, &lz4_preferences);
+    size = frame_size + LZ4_HEADER_SIZE + LZ4_FOOTER_SIZE;
+    buf = malloc(size);
+    if (!buf) {
+        printf("Not enough memory");
+        goto cleanup;
+    }
+
+    n = offset = count_out = LZ4F_compressBegin(ctx, buf, size, &lz4_preferences);
+    if (LZ4F_isError(n)) {
+        printf("Failed to start compression: error %zu", n);
+        goto cleanup;
+    }
+
+    printf("Buffer size is %zu bytes, header size %zu bytes\n", size, n);
+
+    for (;;) {
+        k = fread(src, 1, BUF_SIZE, in);
+        if (k == 0)
+            break;
+        count_in += k;
+
+        n = LZ4F_compressUpdate(ctx, buf + offset, size - offset, src, k, NULL);
+        if (LZ4F_isError(n)) {
+            printf("Compression failed: error %zu", n);
+            goto cleanup;
+        }
+
+        offset += n;
+        count_out += n;
+        if (size - offset < frame_size + LZ4_FOOTER_SIZE) {
+            printf("Writing %zu bytes\n", offset);
+
+            k = fwrite(buf, 1, offset, out);
+            if (k < offset) {
+                if (ferror(out))
+                    printf("Write failed");
+                else
+                    printf("Short write");
+                goto cleanup;
+            }
+
+            offset = 0;
+        }
+    }
+
+    n = LZ4F_compressEnd(ctx, buf + offset, size - offset, NULL);
+    if (LZ4F_isError(n)) {
+        printf("Failed to end compression: error %zu", n);
+        goto cleanup;
+    }
+
+    offset += n;
+    count_out += n;
+    printf("Writing %zu bytes\n", offset);
+
+    k = fwrite(buf, 1, offset, out);
+    if (k < offset) {
+        if (ferror(out))
+            printf("Write failed");
+        else
+            printf("Short write");
+        goto cleanup;
+    }
+
+    *size_in = count_in;
+    *size_out = count_out;
+    r = 0;
+cleanup:
+    if (ctx)
+        LZ4F_freeCompressionContext(ctx);
+    free(src);
+    free(buf);
+    return r;
+}
+
+static int lz4_compress(const char *input, const char *output) {
+    char *tmp = NULL;
+    FILE *in = NULL, *out = NULL;
+    size_t size_in = 0, size_out = 0;
+    int r = 1;
+
+    if (!output) {
+        size_t len = strlen(input);
+
+        output = tmp = malloc(len + 5);
+        if (!tmp) {
+            printf("Not enough memory");
+            return 1;
+        }
+        strcpy(tmp, input);
+        strcpy(tmp + len, ".lz4");
+    }
+
+    in = fopen(input, "rb");
+    if (!in) {
+        fprintf(stderr, "Failed to open input file %s: %s\n", input, strerror(errno));
+        goto cleanup;
+    }
+
+    out = fopen(output, "wb");
+    if (!out) {
+        fprintf(stderr, "Failed to open output file %s: %s\n", output, strerror(errno));
+        goto cleanup;
+    }
+
+    r = compress_file(in, out, &size_in, &size_out);
+    if (r == 0)
+        printf("%s: %zu › %zu bytes, %.1f%%\n",
+        input, size_in, size_out,
+        (double)size_out / size_in * 100);
+cleanup:
+    if (in)
+        fclose(in);
+    if (out)
+        fclose(out);
+    free(tmp);
+    return r;
+}
+*/
+
+
 
 
 #if __cplusplus < 201103L && (!defined(_MSC_VER) || _MSC_VER < 1700)
@@ -238,6 +413,22 @@ bool startsWith(const char *str, const char *pre)
     return lenstr < lenpre ? false : strncmp(pre, str, lenpre) == 0;
 }
 
+bool mkdirp(const char *path)
+{
+    std::string copy = path;
+    char *p = const_cast<char*>(copy.c_str());
+    while (*p) {
+        while (*p && *p != '/') p++;
+        if (!*p) break;
+        *p = 0;
+        int ret = mkdir(copy.c_str());
+        if (ret != 0 && errno != EEXIST) return false;
+        *p = '/';
+        p++;
+    }
+    return true;
+}
+
 /*
 static void tprintf(char str[], const char* format, ...)
 {
@@ -308,6 +499,11 @@ void writeInt(amf::u8 *p, int v)
     p[3] = v & 0xFF;
 }
 
+void readInt(amf::u8 *p, int *v)
+{
+    *v = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+
 template <typename T>
 struct Point
 {
@@ -316,24 +512,113 @@ struct Point
 };
 
 template <typename T>
-struct PointCloud
+class PointCloud
 {
+    std::vector<Point<T>> pts;
+    std::mutex mutex;
+    LASreader *reader;
+    bool preloaded;
+
+public:
     bool hasBounds;
     T min[3];
     T max[3];
-    std::vector<Point<T>> pts;
+    
+    PointCloud(const char* path) : hasBounds(false), reader(NULL)
+    {
+        LASreadOpener opener = LASreadOpener();
+        opener.set_file_name(path);
+        reader = opener.open();
 
-    PointCloud() : hasBounds(false) {}
+        min[0] = reader->get_min_x(); max[0] = reader->get_max_x();
+        min[1] = reader->get_min_y(); max[1] = reader->get_max_y();
+        min[2] = reader->get_min_z(); max[2] = reader->get_max_z();
+    }
+
+    ~PointCloud()
+    {
+        if (reader) delete reader;
+    }
+
+    void preload()
+    {
+        preloaded = true;
+        pts.resize(reader->npoints);
+        //pts.resize(1e6);
+        size_t index = 0;
+        while (reader->read_point())
+        {
+            if (index >= pts.size()) break;
+            LASpoint &point = reader->point;
+            Point<T> &p = pts[index];
+            p.x = point.get_x();
+            p.y = point.get_y();
+            p.z = point.get_z();
+            p.classification = point.classification;
+            index++;
+        }
+    }
+
+    void unpreload()
+    {
+        pts.clear();
+        preloaded = false;
+    }
+
+    inline void rewind()
+    {
+        reader->seek(0);
+    }
+
+    inline bool readPoint(Point<T> &p)
+    {
+        if (!reader->read_point()) return false;
+
+        LASpoint *point = &reader->point;
+        p.x = point->get_x();
+        p.y = point->get_y();
+        p.z = point->get_z();
+        p.classification = point->classification;
+
+        return true;
+    }
+
+    inline bool getPoint(long index, Point<T> &p)
+    {
+        if (!reader->seek(index)) return false;
+        return readPoint(p);
+    }
 
     // Must return the number of data points
-    inline size_t kdtree_get_point_count() const { return pts.size(); }
+    inline size_t kdtree_get_point_count() const
+    {
+        //return 1e6;
+        return reader->npoints;
+    }
+
+    inline bool getNativePoint(const size_t index, LASpoint **p) const
+    {
+        if (!reader->seek(index)) return false;
+        if (!reader->read_point()) return false;
+        *p = &reader->point;
+        return true;
+    }
 
     // Returns the distance between the vector "p1[0:size-1]" and the data point with index "idx_p2" stored in the class:
     inline T kdtree_distance(const T *p1, const size_t idx_p2, size_t /*size*/) const
     {
-        const T d0 = p1[0] - pts[idx_p2].x;
-        const T d1 = p1[1] - pts[idx_p2].y;
-        const T d2 = p1[2] - pts[idx_p2].z;
+        if (preloaded) {
+            const Point<T> &p = pts[idx_p2];
+            const T d0 = p1[0] - p.x;
+            const T d1 = p1[1] - p.y;
+            const T d2 = p1[2] - p.z;
+            return d0*d0 + d1*d1 + d2*d2;
+        }
+
+        LASpoint *p; bool got = getNativePoint(idx_p2, &p); assert(got);
+        const T d0 = p1[0] - p->get_x();
+        const T d1 = p1[1] - p->get_y();
+        const T d2 = p1[2] - p->get_z();
         return d0*d0 + d1*d1 + d2*d2;
     }
 
@@ -342,9 +627,15 @@ struct PointCloud
     //  "if/else's" are actually solved at compile time.
     inline T kdtree_get_pt(const size_t idx, int dim) const
     {
-        if (dim == 0) return pts[idx].x;
-        else if (dim == 1) return pts[idx].y;
-        else return pts[idx].z;
+        if (preloaded) {
+            if (dim == 0) return pts[idx].x;
+            else if (dim == 1) return pts[idx].y;
+            else return pts[idx].z;
+        }
+        LASpoint *p; bool got = getNativePoint(idx, &p); assert(got);
+        if (dim == 0) return p->get_x();
+        else if (dim == 1) return p->get_y();
+        else return p->get_z();
     }
 
     // Optional bounding-box computation: return false to default to a standard bbox computation loop.
@@ -369,6 +660,382 @@ struct PointCloud
 
 };
 
+/*
+static const LZ4F_preferences_t lz4_preferences = {
+    //{ LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
+    { LZ4F_max4MB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
+    16,   // compression level
+    0,   // autoflush
+    { 0, 0, 0, 0 },  // reserved, must be set to 0
+};
+*/
+
+SRes treeProgress(void *p, UInt64 inSize, UInt64 outSize)
+{
+    // Update progress bar.
+    return SZ_OK;
+}
+static ICompressProgress g_ProgressCallback = { &treeProgress };
+
+static void * AllocForLzma(void *p, size_t size) { return malloc(size); }
+static void FreeForLzma(void *p, void *address) { free(address); }
+static ISzAlloc SzAllocForLzma = { &AllocForLzma, &FreeForLzma };
+
+
+class TreeIndex {
+
+    //const size_t inputBufferSize = 16 * 1024;
+    //const size_t inputBufferSize = 256 * 1024;
+    const size_t inputBufferSize = 1024 * 1024 * 1024;
+    size_t outputBufferSize;
+    const size_t headerSize = 19;
+    const size_t footerSize = 4;
+    char *input;
+    char *output;
+    //LZ4F_compressionContext_t ctx;
+    size_t frameSize, position, inputCount, outputCount;
+
+    const char *path;
+    FILE *file;
+
+    size_t readPos;
+    std::vector<unsigned char> inputArray;
+    std::vector<unsigned char> outputArray;
+
+public:
+    bool writing = false;
+
+    TreeIndex() : path(NULL), file(NULL), input(NULL), output(NULL) {}
+    ~TreeIndex() { cleanup(); }
+
+    bool readChecked(void * ptr, size_t size, const char *errorMessage) {
+        size_t readb = fread(ptr, 1, size, file);
+        if (readb != size) {
+            printf("    %s\n", errorMessage);
+            return false;
+        }
+        return true;
+    }
+
+    bool readChecked(size_t *ptr, const char *errorMessage) {
+        unsigned char bytes[4];
+        if (!readChecked(bytes, 4, errorMessage)) return false;
+        int n;
+        readInt(bytes, &n);
+        *ptr = n;
+        return true;
+    }
+
+    bool begin(const char *path) {
+        cleanup();
+
+        this->path = path;
+
+        /*
+        LZ4F_errorCode_t r;
+        size_t writtenBytes;
+
+        position = 0;
+        inputCount = 0;
+
+        r = LZ4F_createCompressionContext(&ctx, LZ4F_VERSION);
+        if (LZ4F_isError(r)) {
+            printf("Failed to create context: error %d", r);
+            return false;
+        }
+        r = 1;
+
+        input = (char*)malloc(inputBufferSize);
+        if (!input) {
+            printf("Not enough memory for input buffer");
+            return error();
+        }
+
+        frameSize = LZ4F_compressBound(inputBufferSize, &lz4_preferences);
+        outputBufferSize = frameSize + headerSize + footerSize;
+        output = (char*)malloc(outputBufferSize);
+        if (!output) {
+            printf("Not enough memory for output buffer");
+            return error();
+        }
+
+        writtenBytes = position = outputCount = LZ4F_compressBegin(ctx, output, outputBufferSize, &lz4_preferences);
+        if (LZ4F_isError(writtenBytes)) {
+            printf("Failed to start compression: error %d", writtenBytes);
+            return error();
+        }
+
+        printf("Buffer size is %d bytes, header size %d bytes\n", outputBufferSize, writtenBytes);
+
+        file = fopen(path, "w");
+        if (!file) {
+            printf("Unable to open file: %s", path);
+            return error();
+        }
+        */
+
+        /*
+        CLzmaEncHandle enc;
+        CLzmaEncProps props;
+        SRes res;
+
+        enc = LzmaEnc_Create(&g_Alloc);
+        if (enc == 0) return false;
+
+        LzmaEncProps_Init(&props);
+        res = LzmaEnc_SetProps(enc, &props);
+
+        if (res == SZ_OK) {
+            Byte header[LZMA_PROPS_SIZE + 8];
+            size_t headerSize = LZMA_PROPS_SIZE;
+            int i;
+
+            res = LzmaEnc_WriteProperties(enc, header, &headerSize);
+            for (i = 0; i < 8; i++)
+                header[headerSize++] = (Byte)(fileSize >> (8 * i));
+            if (outStream->Write(outStream, header, headerSize) != headerSize)
+                res = SZ_ERROR_WRITE;
+            else
+            {
+                if (res == SZ_OK)
+                    res = LzmaEnc_Encode(enc, outStream, inStream, NULL, &g_Alloc, &g_Alloc);
+            }
+        }
+
+        LzmaEnc_Destroy(enc, &g_Alloc, &g_Alloc);
+        */
+
+        if (!writing) {
+            // Reading
+            file = fopen(path, "rb");
+            if (!file) return false;
+
+            struct _stat st;
+            int fd = _fileno(file);
+            if (_fstat(fd, &st)) {
+                printf("Unable to fstat file: %s\n", path);
+                return error();
+            }
+            _dev_t size = st.st_size;
+
+            Byte propsEncoded[LZMA_PROPS_SIZE];
+            if (!readChecked(propsEncoded, LZMA_PROPS_SIZE, "Unable to read props")) return error();
+            
+            size_t uncompressedSize;
+            if (!readChecked(&uncompressedSize, "Unable to read props")) return error();
+
+            inputArray.resize(size - LZMA_PROPS_SIZE - 4);
+            if (!readChecked(inputArray.data(), inputArray.size(), "Unable to read tree index")) return error();
+
+            size_t inputSize = inputArray.size();
+            outputArray.resize(uncompressedSize);
+            SRes ret = LzmaUncompress(outputArray.data(), &uncompressedSize, inputArray.data(), &inputSize, propsEncoded, LZMA_PROPS_SIZE);
+            
+            if (ret != SZ_OK) { printf("Unable to uncompress tree index\n"); return error(); }
+
+            inputArray.clear();
+            readPos = 0;
+
+            fclose(file); file = NULL;
+        }
+
+        return true;
+    }
+
+    bool error() {
+        cleanup();
+        return false;
+    }
+
+    void cleanup() {
+        if (file) { fclose(file); file = NULL; }
+        inputArray.clear();
+        outputArray.clear();
+
+        /*LZ4F_freeCompressionContext(ctx);
+        if (input) { free(input); input = NULL; }
+        if (output) { free(output); output = NULL; }
+        */
+    }
+
+    bool write(char *mem, size_t size) {
+
+        inputArray.insert(inputArray.end(), mem, mem + size);
+
+        /*
+        size_t inputChunk, writtenBytes;
+
+        while (size > 0) {
+            inputChunk = size < inputBufferSize ? size : inputBufferSize;
+            size -= inputChunk;
+
+            inputCount += inputChunk;
+
+            // START OFF FROM HERE!!! use inputChunk bytes from mem and move the mem pointer
+
+            writtenBytes = LZ4F_compressUpdate(ctx, output + position, outputBufferSize - position, mem, inputChunk, NULL);
+            if (LZ4F_isError(writtenBytes)) {
+                printf("Compression failed: error %d", writtenBytes);
+                return error();
+            }
+
+            mem += inputChunk;
+
+            position += writtenBytes;
+            outputCount += writtenBytes;
+            if (outputBufferSize - position < frameSize + footerSize) {
+                printf("Writing %d bytes\n", position);
+
+                writtenBytes = fwrite(output, 1, position, file);
+                if (writtenBytes < position) {
+                    if (ferror(file)) {
+                        printf("Write failed");
+                    } else {
+                        printf("Short write");
+                    }
+                    return error();
+                }
+
+                position = 0;
+            }
+        }
+        */
+
+        return true;
+    }
+
+    size_t read(char *mem, size_t size, size_t count) {
+        if (writing) { printf("Unable to read a tree index in write mode: %s\n", path); return error(); }
+
+        memcpy(mem, &outputArray[readPos], size*count);
+        readPos += size*count;
+
+        return count;
+    }
+
+    SRes Progress(void *p, UInt64 inSize, UInt64 outSize) {
+        printf("%x %d %d\n", p, inSize, outSize);
+    }
+
+    bool writeChecked(const void * ptr, size_t size, const char *errorMessage) {
+        size_t written = fwrite(ptr, 1, size, file);
+        if (written != size) {
+            printf("    %s\n", errorMessage);
+            return false;
+        }
+        return true;
+    }
+
+    bool writeChecked(size_t n, const char *errorMessage) {
+        unsigned char bytes[4];
+        writeInt(bytes, n);
+        return writeChecked(bytes, 4, errorMessage);
+    }
+
+    bool end() {
+
+        if (writing) {
+            outputArray.resize(inputArray.size());
+            SizeT outputLen = outputArray.size();
+
+
+            CLzmaEncProps props;
+            LzmaEncProps_Init(&props);
+
+            props.algo = 0;
+
+            Byte propsEncoded[LZMA_PROPS_SIZE];
+            SizeT propsSize;
+            int numThreads = 8;
+
+            SRes res = LzmaEncode(
+                outputArray.data(),
+                &outputLen,
+                inputArray.data(),
+                inputArray.size(),
+                &props,
+                propsEncoded,
+                &propsSize,
+                props.writeEndMark,
+                &g_ProgressCallback,
+                &SzAllocForLzma,
+                &SzAllocForLzma
+            );
+            
+            //SRes res = LzmaCompress(outputArray.data(), &outputLen, inputArray.data(), inputArray.size(), propsEncoded, &propsSize, -1, 0, -1, -1, -1, -1, numThreads);
+
+            if (propsSize != LZMA_PROPS_SIZE) { printf("Invalid props size: %d\n", propsSize); return error(); }
+            if (res != SZ_OK) { printf("Unable to compress tree index\n"); return error(); }
+
+            file = fopen(path, "wb");
+            if (!file) { printf("Unable to open file for writing: %s\n", path); return error(); }
+
+            size_t written;
+
+            if (!writeChecked(propsEncoded, propsSize, "Unable to write header props")) return error();
+            if (!writeChecked(inputArray.size(), "Unable to write header props")) return error();
+            if (!writeChecked(outputArray.data(), outputLen, "Unable to write compressed bytes")) return error();
+
+            fclose(file);
+        }
+
+        cleanup();
+
+        return true;
+        
+        /*
+        CLzmaEncProps props;
+        LzmaEncProps_Init(&props);
+        Byte propsEncoded[LZMA_PROPS_SIZE];
+        SizeT propsSize;
+        LzmaEncode(outputArray.data(), &outputLen, inputArray.data(), inputArray.size(), &props, propsEncoded, &propsSize, true, this, &g_Alloc, &g_BigAlloc);
+        */
+
+        /*
+        size_t writtenBytes;
+
+        writtenBytes = LZ4F_compressEnd(ctx, output + position, outputBufferSize - position, NULL);
+        if (LZ4F_isError(writtenBytes)) {
+            printf("Failed to end compression: error %d", writtenBytes);
+            return error();
+        }
+
+        position += writtenBytes;
+        outputCount += writtenBytes;
+        printf("Writing %d bytes\n", position);
+
+        writtenBytes = fwrite(output, 1, position, file);
+        if (writtenBytes < position) {
+            if (ferror(file)) {
+                printf("Write failed");
+            }
+            else {
+                printf("Short write");
+            }
+            return error();
+        }
+
+        /*
+        *size_in = inputCount;
+        *size_out = outputCount;
+
+        cleanup();
+        */
+    }
+
+};
+
+
+static void treeWriter(const void * ptr, size_t size, size_t count, void *userdata) {
+    TreeIndex *ti = static_cast<TreeIndex*>(userdata);
+    ti->write((char*)ptr, size*count);
+}
+
+static size_t treeReader(const void * ptr, size_t size, size_t count, void *userdata) {
+    TreeIndex *ti = static_cast<TreeIndex*>(userdata);
+    return ti->read((char*)ptr, size, count);
+}
+
 template <typename num_t>
 class PointSearch {
     typedef KDTreeSingleIndexAdaptor<
@@ -382,11 +1049,16 @@ class PointSearch {
     KDTree *tree;
     int maxLeaf;
 
+    std::string treeAllPath;
+    std::string treeCompAllPath;
+
 public:
     PointCloud<num_t> cloud;
 
-    PointSearch(int maxLeaf) : cloud(PointCloud<num_t>()), tree(NULL) {
+    PointSearch(const char* pclPath, const char* treeAllPath, const char* treeCompAllPath, int maxLeaf) : cloud(PointCloud<num_t>(pclPath)), tree(NULL) {
         this->maxLeaf = maxLeaf;
+        this->treeAllPath = treeAllPath;
+        this->treeCompAllPath = treeCompAllPath;
     }
 
     ~PointSearch() {
@@ -399,25 +1071,79 @@ public:
         tree = NULL;
     }
 
-    void buildTree()
+    void loadTree()
     {
         deleteTree();
+
         tree = new KDTree(3, cloud, KDTreeSingleIndexAdaptorParams(maxLeaf));
-        tree->buildIndex();
-        cloud.kdtree_set_bbox(tree->getRootBoundingBox());
+
+        char treeAllTempPath[1024];
+        TreeIndex ti;
+
+        if (!ti.begin(treeAllPath.c_str())) {
+            // Index missing
+
+            mkdirp(treeAllPath.c_str());
+
+            sprintf_s(treeAllTempPath, "%s.temp", treeAllPath.c_str());
+
+            /*
+            printf("    Processing %d points", cloud.getPointNum());
+
+            Point<num_t> p;
+            cloud.rewind();
+            while (cloud.readPoint(p))
+            {
+            index++;
+            pp.progress((double)index / n);
+            }
+            */
+
+            printf("    Processing %d points\n", cloud.kdtree_get_point_count());
+            cloud.preload();
+
+            printf("    Building tree index\n");
+
+            tree->buildIndex();
+
+            cloud.unpreload();
+
+            printf("    Saving tree index\n");
+
+            ti.writing = true;
+            if (!ti.begin(treeAllTempPath)) {
+                printf("    Unable to begin tree index\n");
+                return;
+            }
+
+            tree->saveIndex(treeWriter, &ti);
+        } else {
+            // Index exists
+            tree->loadIndex(treeReader, &ti);
+        }
+
+        if (!ti.end()) {
+            printf("    Unable to end tree index\n");
+            return;
+        }
+
+        if (ti.writing) {
+            int ret = rename(treeAllTempPath, treeAllPath.c_str());
+            if (ret) printf("    Unable to save index, file already exists: %s\n", treeAllPath.c_str());
+        }
     }
 
-    void findRadius(double *center, RadiusResultSet<num_t, size_t> &results)
+    void findRadius(num_t *center, RadiusResultSet<num_t, size_t> &results)
     {
         std::lock_guard<std::mutex> lock(mutex);
         tree->findNeighbors(results, center, nanoflann::SearchParams(32, 0, false));
     }
 
-    bool findNearest(double *center, size_t &ret_index, double &out_dist_sqr)
+    bool findNearest(num_t *center, size_t &ret_index, num_t &out_dist_sqr)
     {
         std::lock_guard<std::mutex> lock(mutex);
         const int num_results = 1;
-        KNNResultSet<double> result(num_results);
+        KNNResultSet<num_t> result(num_results);
         result.init(&ret_index, &out_dist_sqr);
         return tree->findNeighbors(result, center, nanoflann::SearchParams());
     }
@@ -480,7 +1206,7 @@ struct SpatialHash
 };
 
 //static SpatialHash<MapCloud<double>> mapCloudHash(2);
-static std::list<MapCloud<double>> mapCloudList;
+static std::list<MapCloud<pcln>> mapCloudList;
 static std::mutex mapCloudListMutex;
 
 class ProgressPrinter {
@@ -505,32 +1231,6 @@ public:
 template <typename num_t>
 MapCloud<num_t>& getMapCloud(int lat, int lon)
 {
-    std::lock_guard<std::mutex> lock(mapCloudListMutex);
-    
-    for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
-        if (element->lat == lat && element->lon == lon) {
-            return *element;
-        }
-    }
-
-    mapCloudList.push_front(MapCloud<num_t>());
-
-    MapCloud<num_t>& mc = mapCloudList.front();
-
-    mc.lat = lat;
-    mc.lon = lon;
-
-    char path[1024];
-    sprintf_s(path, "W:/gis/arso/laz/gkot/b_35/D96TM/TM_%d_%d.laz", lat, lon);
-
-    printf("\n");
-
-    printf("  Processing new map cloud at %d, %d from %s\n", lat, lon, path);
-
-    LASreadOpener opener = LASreadOpener();
-    opener.set_file_name(path);
-    LASreader *reader = opener.open();
-
     /*
     reader->inside_rectangle(
     //      462000           101000
@@ -539,17 +1239,11 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     reader->get_max_x() - 0, reader->get_max_y() + 0
     );
     */
-
-    size_t n = (size_t)reader->npoints;
-
     //int skip = 5;
 
     //n /= skip; n++;
 
     //n = 1000000;
-
-    printf("    Reading %d points", n);
-
     /*
     mc.cloud = new PointCloud<num_t>();
     mc.cloud->pts.resize(n);
@@ -558,32 +1252,59 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     mc.cloud->min[2] = reader->get_min_z(); mc.cloud->max[2] = reader->get_max_z();
     */
 
-    if (mc.all) delete mc.all;
-    mc.all = new PointSearch<num_t>(50);
-    mc.all->cloud.pts.resize(n);
-    mc.all->cloud.min[0] = reader->get_min_x(); mc.all->cloud.max[0] = reader->get_max_x();
-    mc.all->cloud.min[1] = reader->get_min_y(); mc.all->cloud.max[1] = reader->get_max_y();
-    mc.all->cloud.min[2] = reader->get_min_z(); mc.all->cloud.max[2] = reader->get_max_z();
 
+
+    std::lock_guard<std::mutex> lock(mapCloudListMutex);
+    
+    for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
+        if (element->lat == lat && element->lon == lon) {
+            return *element;
+        }
+    }
+
+    // Not found, create a new one
+
+    mapCloudList.push_front(MapCloud<num_t>());
+
+    MapCloud<num_t>& mc = mapCloudList.front();
+
+    mc.lat = lat;
+    mc.lon = lon;
+
+    char pclPath[1024], treeAllPath[1024], treeCompAllPath[1024];
+    sprintf_s(pclPath, gkotPathFormat, lat, lon);
+    sprintf_s(treeAllPath, nanoflannAllPathFormat, lat, lon);
+    sprintf_s(treeCompAllPath, nflz4AllPathFormat, lat, lon);
+
+    printf("\n");
+
+    printf("  Processing new map cloud at %d, %d from %s\n", lat, lon, pclPath);
+
+    if (mc.all) delete mc.all;
+    mc.all = new PointSearch<num_t>(pclPath, treeAllPath, treeCompAllPath, 50);
+    //mc.all->cloud.setPointNum(n);
+
+    /*
     if (mc.ground) delete mc.ground;
     mc.ground = new PointSearch<num_t>(20);
-
+    */
+    /*
     size_t index = 0;
     ProgressPrinter pp;
     while (index < n && reader->read_point())
     {
         LASpoint *point = &reader->point;
 
-        Point<num_t> *cp = &(mc.all->cloud.pts[index]);
-        cp->x = point->get_x();
-        cp->y = point->get_y();
-        cp->z = point->get_z();
-        cp->classification = point->classification;
+        Point<num_t> &cp = mc.all->cloud.getPoint(index);
+        cp.x = point->get_x();
+        cp.y = point->get_y();
+        cp.z = point->get_z();
+        cp.classification = point->classification;
 
-        if (point->classification == Classification::GROUND) {
-            mc.ground->cloud.pts.push_back(*cp);
-        }
-
+        //if (point->classification == Classification::GROUND) {
+        //    mc.ground->cloud.addPoint(*cp);
+        //}
+        
         index++;
         pp.progress((double)index / n);
     }
@@ -592,15 +1313,18 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     delete reader;
 
     printf("\n");
+    
 
-    printf("    Building KDTree for %d points\n", n);
-    mc.all->buildTree();
+    */
 
-    printf("    Building KDTree for %d ground points\n", mc.ground->cloud.pts.size());
-    mc.ground->buildTree();
+    printf("  KDTree (all %d points)\n", mc.all->cloud.kdtree_get_point_count());
+    mc.all->loadTree();
 
-    printf("    Done\n");
+    
+    //printf("  Building KDTree for %d ground points\n", mc.ground->cloud.pts.size());
+    //mc.ground->buildTree();
 
+    printf("  Done\n");
     return mapCloudList.front();
 }
 
@@ -996,8 +1720,12 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     // z -> y
 
 
-    static const int lat_min = 461, lat_max = 462;
-    static const int lon_min = 100, lon_max = 101;
+    //static const int lat_min = 461, lat_max = 462;
+    //static const int lon_min = 100, lon_max = 101;
+
+    static const int lat_min = 462, lat_max = 462;
+    static const int lon_min = 101, lon_max = 101;
+    
     static const int origin_z = 462000;
     static const int origin_x = 101000;
     static const int origin_y = 200;
@@ -1023,25 +1751,25 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     debug("mapcloud before");
 
-    MapCloud<double> &mc = getMapCloud<double>(lat, lon);
+    MapCloud<pcln> &mc = getMapCloud<pcln>(lat, lon);
 
     debug("mapcloud after");
 
     //printf(" map ");
 
-    double bounds_min[3] = {
+    pcln bounds_min[3] = {
         abs_z,
         abs_x,
         abs_y
     };
 
-    double bounds_max[3] = {
+    pcln bounds_max[3] = {
         bounds_min[0] + sz,
         bounds_min[1] + sx,
         bounds_min[2] + sy
     };
 
-    double query_box_center[3] = {
+    pcln query_box_center[3] = {
         (bounds_min[0] + bounds_max[0])*0.5,
         (bounds_min[1] + bounds_max[1])*0.5,
         (bounds_min[2] + bounds_max[2])*0.5
@@ -1065,9 +1793,9 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     //timer.tick();
 
 
-    const double radius = sy*0.5;
-    std::vector<std::pair<size_t, double>> indices;
-    RadiusResultSet<double, size_t> results(radius*radius, indices);
+    const pcln radius = sy*0.5;
+    std::vector<std::pair<size_t, pcln>> indices;
+    RadiusResultSet<pcln, size_t> results(radius*radius, indices);
     mc.all->findRadius(query_box_center, results);
     
     //mc.all->tree->findNeighbors(resultSet, query_box_center, nanoflann::SearchParams(32, 0, false));
@@ -1088,9 +1816,10 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     // Initial quantization //
     //                      //
     for (size_t i = 0; i < num; i++) {
-        std::pair<size_t, double> pair = results.m_indices_dists[i];
-        Point<double> &p = mc.all->cloud.pts[pair.first];
-        double dist = pair.second;
+        std::pair<size_t, pcln> pair = results.m_indices_dists[i];
+        Point<pcln> p;
+        mc.all->cloud.getPoint(pair.first, p);
+        pcln dist = pair.second;
 
         //debugPrint("%6d  %6f  %6f  %6f  %d    %6f", i, p.x, p.y, p.z, p.classification, dist);
 
@@ -1121,11 +1850,12 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     debug("building fill");
 
-    //               //
-    // Building fill //
-    //               //
     unsigned int *cblocks = blocks.data();
     if (num > 0) {
+        /*
+        //               //
+        // Building fill //
+        //               //
         for (int i = 0; i < sxyz; i++) {
             unsigned int &cv = cblocks[i];
             int c = cv & 0xFF;
@@ -1146,16 +1876,15 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                 }
 
 
-                double query_block_center[3] = {
+                pcln query_block_center[3] = {
                     bounds_min[0] + bz + 0.5,
                     bounds_min[1] + bx + 0.5,
                     bounds_min[2] + by + 0.5
                 };
 
-                const double radius = 2;
-                std::vector<std::pair<size_t, double> > indices;
-                RadiusResultSet<double, size_t> points(radius*radius, indices);
-                //mc.all->tree->findNeighbors(points, query_block_center, nanoflann::SearchParams(32, 0, false));
+                const pcln radius = 2;
+                std::vector<std::pair<size_t, pcln> > indices;
+                RadiusResultSet<pcln, size_t> points(radius*radius, indices);
                 mc.all->findRadius(query_block_center, points);
 
                 Eigen::Vector3d bcv;
@@ -1167,8 +1896,8 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                 double avgAngle = 0;
                 double avgDot = 0;
                 for (size_t in = 0; in < points.size(); in++) {
-                    std::pair<size_t, double> pair = points.m_indices_dists[in];
-                    Point<double> &p = mc.all->cloud.pts[pair.first];
+                    std::pair<size_t, pcln> pair = points.m_indices_dists[in];
+                    Point<pcln> &p = mc.all->cloud.pts[pair.first];
                     if (p.classification != Classification::BUILDING) continue;
                     Eigen::Vector3d pv(p.x, p.y, p.z);
                     Eigen::Vector3d rv = pv - bcv;
@@ -1182,41 +1911,8 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                 }
                 avgAngle /= buildingPoints;
                 avgDot /= buildingPoints;
-
-                //int blocklight = (int) (avgAngle * 0xF / 90);
-                //int blocklight = 0xF * slantedPoints / buildingPoints;
-                /*
-                int blocklight = (int)(0xF * avgDot * 2) & 0xF;
-                int indexAbove = getBlockIndex(bx - 0, by + 1, bz - 0, sx, sxz);
-                if (by+1 < sy) cblocks[indexAbove] |= blocklight << 16;
-                */
-                //if (avgDot > 0.30) cv = (cv & ~0xFF) | Classification::WATER;
                 if (avgDot > 0.30) cv = (1 << 31) | 0x47d;
 
-                //cblocks[indexAbove] |= (1 << 31) | (blocklight << 8);
-                //if (by + 1 < sy && slantedPoints * 100 / buildingPoints > 2) cv = (cv & ~0xFF) | Classification::WATER;
-                
-                /*
-                cblocks[getBlockIndex(bx - 0, by - 1, bz - 0, sx, sxz)] |= blocklight << 8;
-                cblocks[getBlockIndex(bx - 1, by + 0, bz - 0, sx, sxz)] |= blocklight << 8;
-                cblocks[getBlockIndex(bx + 1, by + 0, bz - 0, sx, sxz)] |= blocklight << 8;
-                cblocks[getBlockIndex(bx - 0, by + 0, bz - 1, sx, sxz)] |= blocklight << 8;
-                cblocks[getBlockIndex(bx + 0, by + 0, bz + 1, sx, sxz)] |= blocklight << 8;
-                */
-
-                /*
-                if (buildingPoints > 0) {
-                    int ratio = slantedPoints * 100 / buildingPoints;
-                    if (ratio >= 50) {
-                        c = Classification::WATER;
-                    }
-                }
-                */
-
-                //printf("%d %d %d %f %f %f\n", bx, bz, by, query_box_center[0], query_box_center[1], query_box_center[2]);
-                //printf("%d %d %d %f %f %f %d nearby\n", bx, bz, by, query_block_center[0], query_block_center[1], query_block_center[2], nearby_points.size());
-
-                //*/
                 break;
             }
         }
@@ -1243,27 +1939,18 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                 }
 
                 if (!found) {
-                    double query_block_center[3] = {
+                    pcln query_block_center[3] = {
                         bounds_min[0] + iz + 0.5,
                         bounds_min[1] + ix + 0.5,
                         bounds_min[2] + 0 + 0.5
                     };
 
-                    /*
-                    const int num_results = 1;
                     size_t ret_index;
-                    double out_dist_sqr;
-                    KNNResultSet<double> result(num_results);
-                    result.init(&ret_index, &out_dist_sqr);
-                    found = mc.ground->tree->findNeighbors(result, query_block_center, nanoflann::SearchParams());
-                    */
-
-                    size_t ret_index;
-                    double out_dist_sqr;
+                    pcln out_dist_sqr;
                     found = mc.ground->findNearest(query_block_center, ret_index, out_dist_sqr);
 
                     if (found) {
-                        Point<double> &p = mc.ground->cloud.pts[ret_index];
+                        Point<pcln> &p = mc.ground->cloud.pts[ret_index];
                         getBlockFromCoords(bounds_min, p, bx, by, bz);
                         bx = ix;
                         bz = iz;
@@ -1280,6 +1967,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
             }
         }
+        */
 
         debug("transform");
 
@@ -1714,8 +2402,8 @@ int main(int argc, char *argv[])
         printf("\n");
     }
 
-    getMapCloud<double>(462, 101);
-    getMapCloud<double>(461, 101);
+    getMapCloud<pcln>(462, 101);
+    getMapCloud<pcln>(461, 101);
 
     /* Wait until the server should be closed */
     while (!exitNow) {

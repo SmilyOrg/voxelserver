@@ -70,6 +70,9 @@ namespace nanoflann
   	/** Library version: 0xMmP (M=Major,m=minor,P=patch) */
 	#define NANOFLANN_VERSION 0x119
 
+    typedef void(*TreeIndexWriter)(const void * ptr, size_t size, size_t count, void *userdata);
+    typedef size_t(*TreeIndexReader)(const void * ptr, size_t size, size_t count, void *userdata);
+
 	/** @addtogroup result_sets_grp Result set classes
 	  *  @{ */
 	template <typename DistanceType, typename IndexType = size_t, typename CountType = size_t>
@@ -203,44 +206,83 @@ namespace nanoflann
 
 	/** @addtogroup loadsave_grp Load/save auxiliary functions
 	  * @{ */
-	template<typename T>
-	void save_value(FILE* stream, const T& value, size_t count = 1)
-	{
-		fwrite(&value, sizeof(value),count, stream);
-	}
+    template<typename T>
+    void save_value(FILE* stream, const T& value, size_t count = 1)
+    {
+        fwrite(&value, sizeof(value), count, stream);
+    }
+
+    template<typename T>
+    void save_value(TreeIndexWriter writer, void *userdata, const T& value, size_t count = 1)
+    {
+        writer(&value, sizeof(value), count, userdata);
+    }
 
 	template<typename T>
 	void save_value(FILE* stream, const std::vector<T>& value)
 	{
 		size_t size = value.size();
-		fwrite(&size, sizeof(size_t), 1, stream);
-		fwrite(&value[0], sizeof(T), size, stream);
-	}
+		fwrite(&size, sizeof(size_t), 1);
+		fwrite(&value[0], sizeof(T), size);
+    }
 
-	template<typename T>
-	void load_value(FILE* stream, T& value, size_t count = 1)
-	{
-		size_t read_cnt = fread(&value, sizeof(value), count, stream);
-		if (read_cnt != count) {
-			throw std::runtime_error("Cannot read from file");
-		}
-	}
+    template<typename T>
+    void save_value(TreeIndexWriter writer, void *userdata, const std::vector<T>& value)
+    {
+        size_t size = value.size();
+        writer(&size, sizeof(size_t), 1, userdata);
+        writer(&value[0], sizeof(T), size, userdata);
+    }
 
 
-	template<typename T>
-	void load_value(FILE* stream, std::vector<T>& value)
-	{
-		size_t size;
-		size_t read_cnt = fread(&size, sizeof(size_t), 1, stream);
-		if (read_cnt!=1) {
-			throw std::runtime_error("Cannot read from file");
-		}
-		value.resize(size);
-		read_cnt = fread(&value[0], sizeof(T), size, stream);
-		if (read_cnt!=size) {
-			throw std::runtime_error("Cannot read from file");
-		}
-	}
+    template<typename T>
+    void load_value(FILE* stream, T& value, size_t count = 1)
+    {
+        size_t read_cnt = fread(&value, sizeof(value), count, stream);
+        if (read_cnt != count) {
+            throw std::runtime_error("Cannot read from file");
+        }
+    }
+
+    template<typename T>
+    void load_value(TreeIndexReader reader, void *userdata, T& value, size_t count = 1)
+    {
+        size_t read_cnt = reader(&value, sizeof(value), count, userdata);
+        if (read_cnt != count) {
+            throw std::runtime_error("Cannot read from file");
+        }
+    }
+
+
+    template<typename T>
+    void load_value(FILE* stream, std::vector<T>& value)
+    {
+        size_t size;
+        size_t read_cnt = fread(&size, sizeof(size_t), 1, stream);
+        if (read_cnt != 1) {
+            throw std::runtime_error("Cannot read from file");
+        }
+        value.resize(size);
+        read_cnt = fread(&value[0], sizeof(T), size, stream);
+        if (read_cnt != size) {
+            throw std::runtime_error("Cannot read from file");
+        }
+    }
+
+    template<typename T>
+    void load_value(TreeIndexReader reader, void *userdata, std::vector<T>& value)
+    {
+        size_t size;
+        size_t read_cnt = reader(&size, sizeof(size_t), 1, userdata);
+        if (read_cnt != 1) {
+            throw std::runtime_error("Cannot read from file");
+        }
+        value.resize(size);
+        read_cnt = reader(&value[0], sizeof(T), size, userdata);
+        if (read_cnt != size) {
+            throw std::runtime_error("Cannot read from file");
+        }
+    }
 	/** @} */
 
 
@@ -982,29 +1024,52 @@ namespace nanoflann
 		}
 
 
-		void save_tree(FILE* stream, NodePtr tree)
-		{
-			save_value(stream, *tree);
-			if (tree->child1!=NULL) {
-				save_tree(stream, tree->child1);
-			}
-			if (tree->child2!=NULL) {
-				save_tree(stream, tree->child2);
-			}
-		}
+        void save_tree(FILE* stream, NodePtr tree)
+        {
+            save_value(stream, *tree);
+            if (tree->child1 != NULL) {
+                save_tree(stream, tree->child1);
+            }
+            if (tree->child2 != NULL) {
+                save_tree(stream, tree->child2);
+            }
+        }
+
+        void save_tree(TreeIndexWriter writer, void *userdata, NodePtr tree)
+        {
+            save_value(writer, userdata, *tree);
+            if (tree->child1 != NULL) {
+                save_tree(writer, userdata, tree->child1);
+            }
+            if (tree->child2 != NULL) {
+                save_tree(writer, userdata, tree->child2);
+            }
+        }
 
 
-		void load_tree(FILE* stream, NodePtr& tree)
-		{
-			tree = pool.allocate<Node>();
-			load_value(stream, *tree);
-			if (tree->child1!=NULL) {
-				load_tree(stream, tree->child1);
-			}
-			if (tree->child2!=NULL) {
-				load_tree(stream, tree->child2);
-			}
-		}
+        void load_tree(FILE* stream, NodePtr& tree)
+        {
+            tree = pool.allocate<Node>();
+            load_value(stream, *tree);
+            if (tree->child1 != NULL) {
+                load_tree(stream, tree->child1);
+            }
+            if (tree->child2 != NULL) {
+                load_tree(stream, tree->child2);
+            }
+        }
+
+        void load_tree(TreeIndexReader reader, void *userdata, NodePtr& tree)
+        {
+            tree = pool.allocate<Node>();
+            load_value(reader, userdata, *tree);
+            if (tree->child1 != NULL) {
+                load_tree(reader, userdata, tree->child1);
+            }
+            if (tree->child2 != NULL) {
+                load_tree(reader, userdata, tree->child2);
+            }
+        }
 
 
 		void computeBoundingBox(BoundingBox& bbox)
@@ -1267,21 +1332,41 @@ namespace nanoflann
 			save_value(stream, m_leaf_max_size);
 			save_value(stream, vind);
 			save_tree(stream, root_node);
-		}
+        }
+        
+        void saveIndex(TreeIndexWriter writer, void *userdata = NULL)
+        {
+            save_value(writer, userdata, m_size);
+            save_value(writer, userdata, dim);
+            save_value(writer, userdata, root_bbox);
+            save_value(writer, userdata, m_leaf_max_size);
+            save_value(writer, userdata, vind);
+            save_tree(writer, userdata, root_node);
+        }
 
 		/**  Loads a previous index from a binary file.
 		  *   IMPORTANT NOTE: The set of data points is NOT stored in the file, so the index object must be constructed associated to the same source of data points used while building the index.
 		  * See the example: examples/saveload_example.cpp
 		  * \sa loadIndex  */
-		void loadIndex(FILE* stream)
-		{
-			load_value(stream, m_size);
-			load_value(stream, dim);
-			load_value(stream, root_bbox);
-			load_value(stream, m_leaf_max_size);
-			load_value(stream, vind);
-			load_tree(stream, root_node);
-		}
+        void loadIndex(FILE* stream)
+        {
+            load_value(stream, m_size);
+            load_value(stream, dim);
+            load_value(stream, root_bbox);
+            load_value(stream, m_leaf_max_size);
+            load_value(stream, vind);
+            load_tree(stream, root_node);
+        }
+
+        void loadIndex(TreeIndexReader reader, void *userdata = NULL)
+        {
+            load_value(reader, userdata, m_size);
+            load_value(reader, userdata, dim);
+            load_value(reader, userdata, root_bbox);
+            load_value(reader, userdata, m_leaf_max_size);
+            load_value(reader, userdata, vind);
+            load_tree(reader, userdata, root_node);
+        }
 
 	};   // class KDTree
 
