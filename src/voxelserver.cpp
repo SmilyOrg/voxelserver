@@ -88,12 +88,23 @@ int exitNow = 0;
 
 #define vassert(x, format, ...) if (!x) { printf(format, __VA_ARGS__); __debugbreak(); }
 
+static std::atomic<int> plogLevel = 0;
+#define plog(format, ...) printf("%*s" format "\n", plogLevel*2, " ", __VA_ARGS__)
+
+typedef struct PlogScope
+{
+    PlogScope() { plogLevel++; }
+    ~PlogScope() { plogLevel--; }
+};
+#define plogScope() PlogScope plog_scope_struct
+
 static const char *gkotPathFormat = "W:/gis/arso/laz/gkot/b_35/D96TM/TM_%d_%d.laz";
+static const char *otrPathFormat = "W:/gis/arso/laz/otr/b_35/D96TM/TMR_%d_%d.laz";
 static const char *nanoflannAllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.kdz";
-static const char *nflz4AllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.lz4";
 static const char *nanoflannGroundPathFormat = "W:/gis/arso/nanoflann/otr/b_35/D96TM/TM_%d_%d.kdtree";
 
-typedef int pcln;
+typedef double pcln;
+typedef Eigen::Vector3d Vec;
 
 enum Classification
 {
@@ -136,160 +147,6 @@ enum BlockType
 
 
 
-/*
-#define BUF_SIZE (16*1024)
-#define LZ4_HEADER_SIZE 19
-#define LZ4_FOOTER_SIZE 4
-
-static const LZ4F_preferences_t lz4_preferences = {
-    { LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
-    0,   // compression level
-    0,   // autoflush
-    { 0, 0, 0, 0 },  // reserved, must be set to 0
-};
-
-static int lz4_compress_file(FILE *in, FILE *out, size_t *size_in, size_t *size_out) {
-    LZ4F_errorCode_t r;
-    LZ4F_compressionContext_t ctx;
-    char *src, *buf = NULL;
-    size_t size, n, k, count_in = 0, count_out, offset = 0, frame_size;
-
-    r = LZ4F_createCompressionContext(&ctx, LZ4F_VERSION);
-    if (LZ4F_isError(r)) {
-        printf("Failed to create context: error %zu", r);
-        return 1;
-    }
-    r = 1;
-
-    src = (char*)malloc(BUF_SIZE);
-    if (!src) {
-        printf("Not enough memory");
-        goto cleanup;
-    }
-
-    frame_size = LZ4F_compressBound(BUF_SIZE, &lz4_preferences);
-    size = frame_size + LZ4_HEADER_SIZE + LZ4_FOOTER_SIZE;
-    buf = malloc(size);
-    if (!buf) {
-        printf("Not enough memory");
-        goto cleanup;
-    }
-
-    n = offset = count_out = LZ4F_compressBegin(ctx, buf, size, &lz4_preferences);
-    if (LZ4F_isError(n)) {
-        printf("Failed to start compression: error %zu", n);
-        goto cleanup;
-    }
-
-    printf("Buffer size is %zu bytes, header size %zu bytes\n", size, n);
-
-    for (;;) {
-        k = fread(src, 1, BUF_SIZE, in);
-        if (k == 0)
-            break;
-        count_in += k;
-
-        n = LZ4F_compressUpdate(ctx, buf + offset, size - offset, src, k, NULL);
-        if (LZ4F_isError(n)) {
-            printf("Compression failed: error %zu", n);
-            goto cleanup;
-        }
-
-        offset += n;
-        count_out += n;
-        if (size - offset < frame_size + LZ4_FOOTER_SIZE) {
-            printf("Writing %zu bytes\n", offset);
-
-            k = fwrite(buf, 1, offset, out);
-            if (k < offset) {
-                if (ferror(out))
-                    printf("Write failed");
-                else
-                    printf("Short write");
-                goto cleanup;
-            }
-
-            offset = 0;
-        }
-    }
-
-    n = LZ4F_compressEnd(ctx, buf + offset, size - offset, NULL);
-    if (LZ4F_isError(n)) {
-        printf("Failed to end compression: error %zu", n);
-        goto cleanup;
-    }
-
-    offset += n;
-    count_out += n;
-    printf("Writing %zu bytes\n", offset);
-
-    k = fwrite(buf, 1, offset, out);
-    if (k < offset) {
-        if (ferror(out))
-            printf("Write failed");
-        else
-            printf("Short write");
-        goto cleanup;
-    }
-
-    *size_in = count_in;
-    *size_out = count_out;
-    r = 0;
-cleanup:
-    if (ctx)
-        LZ4F_freeCompressionContext(ctx);
-    free(src);
-    free(buf);
-    return r;
-}
-
-static int lz4_compress(const char *input, const char *output) {
-    char *tmp = NULL;
-    FILE *in = NULL, *out = NULL;
-    size_t size_in = 0, size_out = 0;
-    int r = 1;
-
-    if (!output) {
-        size_t len = strlen(input);
-
-        output = tmp = malloc(len + 5);
-        if (!tmp) {
-            printf("Not enough memory");
-            return 1;
-        }
-        strcpy(tmp, input);
-        strcpy(tmp + len, ".lz4");
-    }
-
-    in = fopen(input, "rb");
-    if (!in) {
-        fprintf(stderr, "Failed to open input file %s: %s\n", input, strerror(errno));
-        goto cleanup;
-    }
-
-    out = fopen(output, "wb");
-    if (!out) {
-        fprintf(stderr, "Failed to open output file %s: %s\n", output, strerror(errno));
-        goto cleanup;
-    }
-
-    r = compress_file(in, out, &size_in, &size_out);
-    if (r == 0)
-        printf("%s: %zu › %zu bytes, %.1f%%\n",
-        input, size_in, size_out,
-        (double)size_out / size_in * 100);
-cleanup:
-    if (in)
-        fclose(in);
-    if (out)
-        fclose(out);
-    free(tmp);
-    return r;
-}
-*/
-
-
-
 
 #if __cplusplus < 201103L && (!defined(_MSC_VER) || _MSC_VER < 1700)
 #error Timer requires C++11
@@ -300,11 +157,18 @@ class Timer {
     typedef std::chrono::nanoseconds ns;
 
     clock::time_point start;
+    const char *name;
+    bool printed = false;
 
 public:
-    Timer()
+    Timer(const char *name)
     {
+        this->name = name;
         tick();
+    }
+    ~Timer()
+    {
+        if (!printed) print();
     }
     void tick()
     {
@@ -313,6 +177,24 @@ public:
     ns tock() const
     {
         return std::chrono::duration_cast<ns>(clock::now() - start);
+    }
+    void print()
+    {
+        long long c = tock().count();
+        printed = true;
+        const char *unit;
+        if (c < 1000) {
+            unit = "ns";
+        }
+        else if (c < 1000000l) {
+            c /= 1000l;
+            unit = "us";
+        }
+        else {
+            c /= 1000000l;
+            unit = "ms";
+        }
+        plog("%s %*s%ld%s", name, 20 - strlen(name), " ", c, unit);
     }
 };
 #endif
@@ -386,8 +268,8 @@ bool getParamBool(const char *queryString, size_t queryLength, const char *name)
 }
 
 #define debugPrint(...) if (debug) mg_printf(conn, __VA_ARGS__)
-#if 0
-#define debug(format, ...) printf(format "\n", __VA_ARGS__)
+#if 1
+#define debug(format, ...) plog(format, __VA_ARGS__)
 #else
 #define debug(format, ...) 
 #endif
@@ -504,31 +386,40 @@ void readInt(amf::u8 *p, int *v)
     *v = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
 }
 
-template <typename T>
 struct Point
 {
-    T  x, y, z;
+    double        x, y, z;
     unsigned char classification;
 };
 
 template <typename T>
 class PointCloud
 {
-    std::vector<Point<T>> pts;
     std::mutex mutex;
-    LASreader *reader;
     bool preloaded;
 
+
 public:
+    std::vector<Point> pts;
+
+    LASreader *reader;
+
     bool hasBounds;
     T min[3];
     T max[3];
     
-    PointCloud(const char* path) : hasBounds(false), reader(NULL)
+    PointCloud(const char* path) : hasBounds(false), reader(NULL), preloaded(false)
     {
         LASreadOpener opener = LASreadOpener();
+        //opener.set_buffer_size(100000000);
+        //opener.set_io_ibuffer_size(262144*1000);
         opener.set_file_name(path);
         reader = opener.open();
+        
+        if (!reader) {
+            plog("Unable to open %s", path);
+            exit(1);
+        }
 
         min[0] = reader->get_min_x(); max[0] = reader->get_max_x();
         min[1] = reader->get_min_y(); max[1] = reader->get_max_y();
@@ -538,6 +429,23 @@ public:
     ~PointCloud()
     {
         if (reader) delete reader;
+    }
+
+    void setBounds(double min_x, double min_y, double max_x, double max_y)
+    {
+        assert(reader);
+        vassert(reader->inside_none(), "Unable to reset LASreader bounds");
+        vassert(reader->inside_rectangle(min_x, min_y, max_x, max_y), "Unable to set LASreader bounds");
+        min[0] = min_x; max[0] = max_x;
+        min[1] = min_y; max[1] = max_y;
+        hasBounds = true;
+    }
+
+    Vec getQuantizedPoint(double x, double y, double z)
+    {
+        Vec ret;
+        ret << reader->header.get_X(x), reader->header.get_Y(y), reader->header.get_Z(z);
+        return ret;
     }
 
     void preload()
@@ -550,13 +458,19 @@ public:
         {
             if (index >= pts.size()) break;
             LASpoint &point = reader->point;
-            Point<T> &p = pts[index];
-            p.x = point.get_x();
-            p.y = point.get_y();
-            p.z = point.get_z();
+            Point &p = pts[index];
+            p.x = point.get_X();
+            p.y = point.get_Y();
+            p.z = point.get_Z();
             p.classification = point.classification;
             index++;
         }
+    }
+
+    void addPoint(Point &point)
+    {
+        preloaded = true;
+        pts.push_back(point);
     }
 
     void unpreload()
@@ -570,7 +484,7 @@ public:
         reader->seek(0);
     }
 
-    inline bool readPoint(Point<T> &p)
+    inline bool readPoint(Point &p)
     {
         if (!reader->read_point()) return false;
 
@@ -583,17 +497,22 @@ public:
         return true;
     }
 
-    inline bool getPoint(long index, Point<T> &p)
+    inline bool getPoint(long index, Point &p)
     {
         if (!reader->seek(index)) return false;
         return readPoint(p);
+    }
+
+    inline size_t getPointNum() const
+    {
+        return preloaded ? pts.size() : reader->npoints;
     }
 
     // Must return the number of data points
     inline size_t kdtree_get_point_count() const
     {
         //return 1e6;
-        return reader->npoints;
+        return getPointNum();
     }
 
     inline bool getNativePoint(const size_t index, LASpoint **p) const
@@ -608,7 +527,7 @@ public:
     inline T kdtree_distance(const T *p1, const size_t idx_p2, size_t /*size*/) const
     {
         if (preloaded) {
-            const Point<T> &p = pts[idx_p2];
+            const Point &p = pts[idx_p2];
             const T d0 = p1[0] - p.x;
             const T d1 = p1[1] - p.y;
             const T d2 = p1[2] - p.z;
@@ -660,15 +579,6 @@ public:
 
 };
 
-/*
-static const LZ4F_preferences_t lz4_preferences = {
-    //{ LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
-    { LZ4F_max4MB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
-    16,   // compression level
-    0,   // autoflush
-    { 0, 0, 0, 0 },  // reserved, must be set to 0
-};
-*/
 
 SRes treeProgress(void *p, UInt64 inSize, UInt64 outSize)
 {
@@ -684,17 +594,6 @@ static ISzAlloc SzAllocForLzma = { &AllocForLzma, &FreeForLzma };
 
 class TreeIndex {
 
-    //const size_t inputBufferSize = 16 * 1024;
-    //const size_t inputBufferSize = 256 * 1024;
-    const size_t inputBufferSize = 1024 * 1024 * 1024;
-    size_t outputBufferSize;
-    const size_t headerSize = 19;
-    const size_t footerSize = 4;
-    char *input;
-    char *output;
-    //LZ4F_compressionContext_t ctx;
-    size_t frameSize, position, inputCount, outputCount;
-
     const char *path;
     FILE *file;
 
@@ -705,13 +604,13 @@ class TreeIndex {
 public:
     bool writing = false;
 
-    TreeIndex() : path(NULL), file(NULL), input(NULL), output(NULL) {}
+    TreeIndex() : path(NULL), file(NULL) {}
     ~TreeIndex() { cleanup(); }
 
     bool readChecked(void * ptr, size_t size, const char *errorMessage) {
         size_t readb = fread(ptr, 1, size, file);
         if (readb != size) {
-            printf("    %s\n", errorMessage);
+            plog("%s", errorMessage);
             return false;
         }
         return true;
@@ -731,80 +630,6 @@ public:
 
         this->path = path;
 
-        /*
-        LZ4F_errorCode_t r;
-        size_t writtenBytes;
-
-        position = 0;
-        inputCount = 0;
-
-        r = LZ4F_createCompressionContext(&ctx, LZ4F_VERSION);
-        if (LZ4F_isError(r)) {
-            printf("Failed to create context: error %d", r);
-            return false;
-        }
-        r = 1;
-
-        input = (char*)malloc(inputBufferSize);
-        if (!input) {
-            printf("Not enough memory for input buffer");
-            return error();
-        }
-
-        frameSize = LZ4F_compressBound(inputBufferSize, &lz4_preferences);
-        outputBufferSize = frameSize + headerSize + footerSize;
-        output = (char*)malloc(outputBufferSize);
-        if (!output) {
-            printf("Not enough memory for output buffer");
-            return error();
-        }
-
-        writtenBytes = position = outputCount = LZ4F_compressBegin(ctx, output, outputBufferSize, &lz4_preferences);
-        if (LZ4F_isError(writtenBytes)) {
-            printf("Failed to start compression: error %d", writtenBytes);
-            return error();
-        }
-
-        printf("Buffer size is %d bytes, header size %d bytes\n", outputBufferSize, writtenBytes);
-
-        file = fopen(path, "w");
-        if (!file) {
-            printf("Unable to open file: %s", path);
-            return error();
-        }
-        */
-
-        /*
-        CLzmaEncHandle enc;
-        CLzmaEncProps props;
-        SRes res;
-
-        enc = LzmaEnc_Create(&g_Alloc);
-        if (enc == 0) return false;
-
-        LzmaEncProps_Init(&props);
-        res = LzmaEnc_SetProps(enc, &props);
-
-        if (res == SZ_OK) {
-            Byte header[LZMA_PROPS_SIZE + 8];
-            size_t headerSize = LZMA_PROPS_SIZE;
-            int i;
-
-            res = LzmaEnc_WriteProperties(enc, header, &headerSize);
-            for (i = 0; i < 8; i++)
-                header[headerSize++] = (Byte)(fileSize >> (8 * i));
-            if (outStream->Write(outStream, header, headerSize) != headerSize)
-                res = SZ_ERROR_WRITE;
-            else
-            {
-                if (res == SZ_OK)
-                    res = LzmaEnc_Encode(enc, outStream, inStream, NULL, &g_Alloc, &g_Alloc);
-            }
-        }
-
-        LzmaEnc_Destroy(enc, &g_Alloc, &g_Alloc);
-        */
-
         if (!writing) {
             // Reading
             file = fopen(path, "rb");
@@ -813,7 +638,7 @@ public:
             struct _stat st;
             int fd = _fileno(file);
             if (_fstat(fd, &st)) {
-                printf("Unable to fstat file: %s\n", path);
+                plog("Unable to fstat file: %s", path);
                 return error();
             }
             _dev_t size = st.st_size;
@@ -831,7 +656,7 @@ public:
             outputArray.resize(uncompressedSize);
             SRes ret = LzmaUncompress(outputArray.data(), &uncompressedSize, inputArray.data(), &inputSize, propsEncoded, LZMA_PROPS_SIZE);
             
-            if (ret != SZ_OK) { printf("Unable to uncompress tree index\n"); return error(); }
+            if (ret != SZ_OK) { plog("Unable to uncompress tree index"); return error(); }
 
             inputArray.clear();
             readPos = 0;
@@ -851,61 +676,17 @@ public:
         if (file) { fclose(file); file = NULL; }
         inputArray.clear();
         outputArray.clear();
-
-        /*LZ4F_freeCompressionContext(ctx);
-        if (input) { free(input); input = NULL; }
-        if (output) { free(output); output = NULL; }
-        */
     }
 
     bool write(char *mem, size_t size) {
 
         inputArray.insert(inputArray.end(), mem, mem + size);
 
-        /*
-        size_t inputChunk, writtenBytes;
-
-        while (size > 0) {
-            inputChunk = size < inputBufferSize ? size : inputBufferSize;
-            size -= inputChunk;
-
-            inputCount += inputChunk;
-
-            // START OFF FROM HERE!!! use inputChunk bytes from mem and move the mem pointer
-
-            writtenBytes = LZ4F_compressUpdate(ctx, output + position, outputBufferSize - position, mem, inputChunk, NULL);
-            if (LZ4F_isError(writtenBytes)) {
-                printf("Compression failed: error %d", writtenBytes);
-                return error();
-            }
-
-            mem += inputChunk;
-
-            position += writtenBytes;
-            outputCount += writtenBytes;
-            if (outputBufferSize - position < frameSize + footerSize) {
-                printf("Writing %d bytes\n", position);
-
-                writtenBytes = fwrite(output, 1, position, file);
-                if (writtenBytes < position) {
-                    if (ferror(file)) {
-                        printf("Write failed");
-                    } else {
-                        printf("Short write");
-                    }
-                    return error();
-                }
-
-                position = 0;
-            }
-        }
-        */
-
         return true;
     }
 
     size_t read(char *mem, size_t size, size_t count) {
-        if (writing) { printf("Unable to read a tree index in write mode: %s\n", path); return error(); }
+        if (writing) { plog("Unable to read a tree index in write mode: %s", path); return error(); }
 
         memcpy(mem, &outputArray[readPos], size*count);
         readPos += size*count;
@@ -913,14 +694,10 @@ public:
         return count;
     }
 
-    SRes Progress(void *p, UInt64 inSize, UInt64 outSize) {
-        printf("%x %d %d\n", p, inSize, outSize);
-    }
-
     bool writeChecked(const void * ptr, size_t size, const char *errorMessage) {
         size_t written = fwrite(ptr, 1, size, file);
         if (written != size) {
-            printf("    %s\n", errorMessage);
+            plog("%s", errorMessage);
             return false;
         }
         return true;
@@ -946,7 +723,8 @@ public:
 
             Byte propsEncoded[LZMA_PROPS_SIZE];
             SizeT propsSize;
-            int numThreads = 8;
+
+            plog("Compressing tree index");
 
             SRes res = LzmaEncode(
                 outputArray.data(),
@@ -961,16 +739,14 @@ public:
                 &SzAllocForLzma,
                 &SzAllocForLzma
             );
-            
-            //SRes res = LzmaCompress(outputArray.data(), &outputLen, inputArray.data(), inputArray.size(), propsEncoded, &propsSize, -1, 0, -1, -1, -1, -1, numThreads);
 
-            if (propsSize != LZMA_PROPS_SIZE) { printf("Invalid props size: %d\n", propsSize); return error(); }
-            if (res != SZ_OK) { printf("Unable to compress tree index\n"); return error(); }
+            plog("Saving tree index");
+            
+            if (propsSize != LZMA_PROPS_SIZE) { plog("Invalid props size: %d", propsSize); return error(); }
+            if (res != SZ_OK) { plog("Unable to compress tree index"); return error(); }
 
             file = fopen(path, "wb");
-            if (!file) { printf("Unable to open file for writing: %s\n", path); return error(); }
-
-            size_t written;
+            if (!file) { plog("Unable to open file for writing: %s", path); return error(); }
 
             if (!writeChecked(propsEncoded, propsSize, "Unable to write header props")) return error();
             if (!writeChecked(inputArray.size(), "Unable to write header props")) return error();
@@ -982,45 +758,6 @@ public:
         cleanup();
 
         return true;
-        
-        /*
-        CLzmaEncProps props;
-        LzmaEncProps_Init(&props);
-        Byte propsEncoded[LZMA_PROPS_SIZE];
-        SizeT propsSize;
-        LzmaEncode(outputArray.data(), &outputLen, inputArray.data(), inputArray.size(), &props, propsEncoded, &propsSize, true, this, &g_Alloc, &g_BigAlloc);
-        */
-
-        /*
-        size_t writtenBytes;
-
-        writtenBytes = LZ4F_compressEnd(ctx, output + position, outputBufferSize - position, NULL);
-        if (LZ4F_isError(writtenBytes)) {
-            printf("Failed to end compression: error %d", writtenBytes);
-            return error();
-        }
-
-        position += writtenBytes;
-        outputCount += writtenBytes;
-        printf("Writing %d bytes\n", position);
-
-        writtenBytes = fwrite(output, 1, position, file);
-        if (writtenBytes < position) {
-            if (ferror(file)) {
-                printf("Write failed");
-            }
-            else {
-                printf("Short write");
-            }
-            return error();
-        }
-
-        /*
-        *size_in = inputCount;
-        *size_out = outputCount;
-
-        cleanup();
-        */
     }
 
 };
@@ -1049,16 +786,14 @@ class PointSearch {
     KDTree *tree;
     int maxLeaf;
 
-    std::string treeAllPath;
-    std::string treeCompAllPath;
+    std::string treePath;
 
 public:
     PointCloud<num_t> cloud;
 
-    PointSearch(const char* pclPath, const char* treeAllPath, const char* treeCompAllPath, int maxLeaf) : cloud(PointCloud<num_t>(pclPath)), tree(NULL) {
+    PointSearch(const char* pclPath, const char* treePath, int maxLeaf) : cloud(PointCloud<num_t>(pclPath)), tree(NULL) {
         this->maxLeaf = maxLeaf;
-        this->treeAllPath = treeAllPath;
-        this->treeCompAllPath = treeCompAllPath;
+        this->treePath = treePath;
     }
 
     ~PointSearch() {
@@ -1073,6 +808,8 @@ public:
 
     void loadTree()
     {
+        plogScope();
+
         deleteTree();
 
         tree = new KDTree(3, cloud, KDTreeSingleIndexAdaptorParams(maxLeaf));
@@ -1080,39 +817,27 @@ public:
         char treeAllTempPath[1024];
         TreeIndex ti;
 
-        if (!ti.begin(treeAllPath.c_str())) {
+        if (!ti.begin(treePath.c_str())) {
             // Index missing
 
-            mkdirp(treeAllPath.c_str());
+            mkdirp(treePath.c_str());
 
-            sprintf_s(treeAllTempPath, "%s.temp", treeAllPath.c_str());
+            sprintf_s(treeAllTempPath, "%s.temp", treePath.c_str());
 
-            /*
-            printf("    Processing %d points", cloud.getPointNum());
-
-            Point<num_t> p;
-            cloud.rewind();
-            while (cloud.readPoint(p))
-            {
-            index++;
-            pp.progress((double)index / n);
-            }
-            */
-
-            printf("    Processing %d points\n", cloud.kdtree_get_point_count());
+            plog("Processing %d points", cloud.kdtree_get_point_count());
             cloud.preload();
 
-            printf("    Building tree index\n");
+            plog("Building tree index");
 
             tree->buildIndex();
 
             cloud.unpreload();
 
-            printf("    Saving tree index\n");
+            plog("Serializing tree index");
 
             ti.writing = true;
             if (!ti.begin(treeAllTempPath)) {
-                printf("    Unable to begin tree index\n");
+                plog("Unable to begin tree index");
                 return;
             }
 
@@ -1123,13 +848,13 @@ public:
         }
 
         if (!ti.end()) {
-            printf("    Unable to end tree index\n");
+            plog("Unable to end tree index");
             return;
         }
 
         if (ti.writing) {
-            int ret = rename(treeAllTempPath, treeAllPath.c_str());
-            if (ret) printf("    Unable to save index, file already exists: %s\n", treeAllPath.c_str());
+            int ret = rename(treeAllTempPath, treePath.c_str());
+            if (ret) plog("Unable to save index, file already exists: %s", treePath.c_str());
         }
     }
 
@@ -1164,6 +889,7 @@ struct MapCloud {
 template <typename T>
 struct SpatialHash
 {
+    bool initialized = false;
     unsigned int size;
     unsigned int mask;
     T* hash;
@@ -1177,7 +903,11 @@ struct SpatialHash
 
     ~SpatialHash()
     {
-        delete hash;
+        if (!initialized) return;
+        if (hash) {
+            delete hash;
+            hash = NULL;
+        }
     }
 
     T& at(int x, int y)
@@ -1271,17 +1001,25 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     mc.lat = lat;
     mc.lon = lon;
 
-    char pclPath[1024], treeAllPath[1024], treeCompAllPath[1024];
-    sprintf_s(pclPath, gkotPathFormat, lat, lon);
+    plog("");
+    plog("Processing new map cloud at %d, %d", lat, lon);
+
+    char allPath[1024], treeAllPath[1024],
+         groundPath[1024], treeGroundPath[1024];
+
+    sprintf_s(allPath, gkotPathFormat, lat, lon);
+    sprintf_s(groundPath, otrPathFormat, lat, lon);
     sprintf_s(treeAllPath, nanoflannAllPathFormat, lat, lon);
-    sprintf_s(treeCompAllPath, nflz4AllPathFormat, lat, lon);
-
-    printf("\n");
-
-    printf("  Processing new map cloud at %d, %d from %s\n", lat, lon, pclPath);
+    sprintf_s(treeGroundPath, nanoflannGroundPathFormat, lat, lon);
 
     if (mc.all) delete mc.all;
-    mc.all = new PointSearch<num_t>(pclPath, treeAllPath, treeCompAllPath, 50);
+    if (mc.ground) delete mc.ground;
+
+    plogScope();
+
+    mc.all    = new PointSearch<num_t>(allPath, treeAllPath, 50);
+    mc.ground = new PointSearch<num_t>(groundPath, treeGroundPath, 20);
+
     //mc.all->cloud.setPointNum(n);
 
     /*
@@ -1317,14 +1055,18 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
 
     */
 
-    printf("  KDTree (all %d points)\n", mc.all->cloud.kdtree_get_point_count());
+    /*
+    plog("Loading all point index (%d)", mc.all->cloud.kdtree_get_point_count());
     mc.all->loadTree();
 
+    plog("Loading ground point index (%d)", mc.ground->cloud.kdtree_get_point_count());
+    mc.ground->loadTree();
+    */
     
     //printf("  Building KDTree for %d ground points\n", mc.ground->cloud.pts.size());
     //mc.ground->buildTree();
 
-    printf("  Done\n");
+    plog("Done");
     return mapCloudList.front();
 }
 
@@ -1582,7 +1324,7 @@ static void renderBoxesUsed(MapImage &img)
 }
 
 template <typename num_t>
-static inline void getBlockFromCoords(num_t *origin, Point<num_t> &p, int &bx, int &by, int &bz)
+static inline void getBlockFromCoords(num_t *origin, Point &p, int &bx, int &by, int &bz)
 {
     bx = static_cast<int>(p.y - origin[1]);
     by = static_cast<int>(p.z - origin[2]);
@@ -1590,6 +1332,107 @@ static inline void getBlockFromCoords(num_t *origin, Point<num_t> &p, int &bx, i
 }
 
 static std::mutex boxvisMutex;
+
+class TreeSearch {
+
+    typedef KDTreeSingleIndexAdaptor<
+        L2_Simple_Adaptor<pcln, TreeSearch>, // Distance
+        TreeSearch, // Dataset
+        3 // Dimensions
+    > KDTree;
+
+    std::mutex mutex;
+
+    std::vector<Point> pts;
+    KDTree *tree;
+
+public:
+
+    TreeSearch(int maxLeaf) : tree(NULL) {
+        tree = new KDTree(3, *this, KDTreeSingleIndexAdaptorParams(maxLeaf));
+    }
+    ~TreeSearch() {
+        if (tree) delete tree;
+        tree = NULL;
+    }
+
+    void addPoint(Point &point)
+    {
+        pts.push_back(point);
+    }
+
+    Point& getPoint(size_t index)
+    {
+        return pts[index];
+    }
+
+    void build()
+    {
+        tree->buildIndex();
+    }
+
+    void findRadius(pcln *center, RadiusResultSet<pcln, size_t> &results)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        tree->findNeighbors(results, center, nanoflann::SearchParams(32, 0, false));
+    }
+
+    bool findNearest(pcln *center, size_t &ret_index, pcln &out_dist_sqr)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const int num_results = 1;
+        KNNResultSet<pcln> result(num_results);
+        result.init(&ret_index, &out_dist_sqr);
+        return tree->findNeighbors(result, center, nanoflann::SearchParams());
+    }
+
+    inline size_t getPointNum() const
+    {
+        return pts.size();
+    }
+
+    // Must return the number of data points
+    inline size_t kdtree_get_point_count() const
+    {
+        //return 1e6;
+        return getPointNum();
+    }
+
+    // Returns the distance between the vector "p1[0:size-1]" and the data point with index "idx_p2" stored in the class:
+    inline pcln kdtree_distance(const pcln *p1, const size_t idx_p2, size_t /*size*/) const
+    {
+        const Point &p = pts[idx_p2];
+        const pcln d0 = p1[0] - p.x;
+        const pcln d1 = p1[1] - p.y;
+        const pcln d2 = p1[2] - p.z;
+        return d0*d0 + d1*d1 + d2*d2;
+    }
+
+    // Returns the dim'th component of the idx'th point in the class:
+    // Since this is inlined and the "dim" argument is typically an immediate value, the
+    //  "if/else's" are actually solved at compile time.
+    inline pcln kdtree_get_pt(const size_t idx, int dim) const
+    {
+        if (dim == 0) return pts[idx].x;
+        else if (dim == 1) return pts[idx].y;
+        else return pts[idx].z;
+    }
+
+    // Optional bounding-box computation: return false to default to a standard bbox computation loop.
+    //   Return true if the BBOX was already computed by the class and returned in "bb" so it can be avoided to redo it again.
+    //   Look at bb.size() to find out the expected dimensionality (e.g. 2 or 3 for point clouds)
+    template <class BBOX>
+    bool kdtree_get_bbox(BBOX& bb) const {
+        return false;
+    }
+
+    template <class BBOX>
+    void kdtree_set_bbox(BBOX& bb) {
+    }
+
+
+};
+
 
 void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
@@ -1601,6 +1444,8 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     long sy = 512;
     long sz = 1;
     bool debug = false;
+
+    plogScope();
 
     //char status[128];
 
@@ -1749,14 +1594,65 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     ensureMapCloud<double>(mc, lat, lon, mapHashCode);
     */
 
-    debug("mapcloud before");
+    debug("mapcloud get");
 
+    Timer timer_mc("mapcloud");
     MapCloud<pcln> &mc = getMapCloud<pcln>(lat, lon);
-
-    debug("mapcloud after");
+    timer_mc.print();
 
     //printf(" map ");
 
+    /*
+    Vec
+        bounds_min,
+        bounds_max,
+        query_box_center;
+
+    bounds_min = mc.all->cloud.getQuantizedPoint(abs_z, abs_x, abs_y);
+    bounds_max = mc.all->cloud.getQuantizedPoint(abs_z + sz, abs_x + sx, abs_y + sy);
+    query_box_center = (bounds_min + bounds_max) / 2;
+    //*/
+
+    /*
+    Vec bmin, bmax;
+    bmin << abs_z, abs_x, abs_y;
+    bmax << abs_z + sz, abs_x + sx, abs_y + sy;
+
+    mc.all->cloud.setBounds(bmin.x(), bmin.y(), bmax.x(), bmax.y());
+    */
+
+    Vec
+        bounds_min,
+        bounds_max,
+        query_box_center;
+    bounds_min << abs_z, abs_x, abs_y;
+    bounds_max << abs_z + sz, abs_x + sx, abs_y + sy;
+    query_box_center = (bounds_min + bounds_max) / 2;
+
+    {
+        Timer timer("bounds");
+        mc.all->cloud.setBounds(bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
+    }
+
+    // 462006. 101005. 462016. 101015.00000000000
+
+    /*
+    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
+    printf("ins rec %d\n", mc.all->cloud.reader->inside_rectangle(462005., 101005, 462010., 101010.));
+    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
+    printf("read point %d\n", mc.all->cloud.reader->read_point());
+    printf("%f %f\n", mc.all->cloud.reader->point.get_x(), mc.all->cloud.reader->point.get_y());
+
+    printf("ins none %d\n", mc.all->cloud.reader->inside_none());
+
+    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
+    printf("ins rec %d\n", mc.all->cloud.reader->inside_rectangle(462030., 101030., 462040., 101040.));
+    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
+    printf("read point %d\n", mc.all->cloud.reader->read_point());
+    printf("%f %f\n", mc.all->cloud.reader->point.get_x(), mc.all->cloud.reader->point.get_y());
+    //*/
+
+    /*
     pcln bounds_min[3] = {
         abs_z,
         abs_x,
@@ -1774,6 +1670,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
         (bounds_min[1] + bounds_max[1])*0.5,
         (bounds_min[2] + bounds_max[2])*0.5
     };
+    //*/
 
     //ProgressPrinter pp;
 
@@ -1792,11 +1689,12 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     //timer.tick();
 
-
-    const pcln radius = sy*0.5;
+    /*
+    const pcln radius = sy/2 + 1;
     std::vector<std::pair<size_t, pcln>> indices;
     RadiusResultSet<pcln, size_t> results(radius*radius, indices);
-    mc.all->findRadius(query_box_center, results);
+    mc.all->findRadius(query_box_center.data(), results);
+    */
     
     //mc.all->tree->findNeighbors(resultSet, query_box_center, nanoflann::SearchParams(32, 0, false));
 
@@ -1804,194 +1702,217 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     //mc.mutex.unlock();
 
-    size_t num = results.size();
+    //size_t num = results.size();
+
+    size_t num = 0;
 
     //debugPrint("%d query took %d ms\n", timer.tock().count());
 
     //debugPrint("%d points found\n", num);
 
-    debug("quantization");
+
+    TreeSearch psall(50);
+    TreeSearch psground(20);
 
     //                      //
     // Initial quantization //
     //                      //
-    for (size_t i = 0; i < num; i++) {
-        std::pair<size_t, pcln> pair = results.m_indices_dists[i];
-        Point<pcln> p;
-        mc.all->cloud.getPoint(pair.first, p);
-        pcln dist = pair.second;
+    //for (size_t i = 0; i < num; i++) {
+    {
+        Timer timer("quantization");
+        Point p;
+        while (mc.all->cloud.readPoint(p)) {
+            //std::pair<size_t, pcln> pair = results.m_indices_dists[i];
+            //mc.all->cloud.getPoint(pair.first, p);
+            //pcln dist = pair.second;
 
-        //debugPrint("%6d  %6f  %6f  %6f  %d    %6f", i, p.x, p.y, p.z, p.classification, dist);
+            //debugPrint("%6d  %6f  %6f  %6f  %d    %6f", i, p.x, p.y, p.z, p.classification, dist);
 
-        if (p.x < bounds_min[0] || p.x >= bounds_max[0] ||
-            p.y < bounds_min[1] || p.y >= bounds_max[1] ||
-            p.z < bounds_min[2] || p.z >= bounds_max[2]) continue;
+            if (p.x < bounds_min.x() || p.x >= bounds_max.x() ||
+                p.y < bounds_min.y() || p.y >= bounds_max.y() ||
+                p.z < bounds_min.z() || p.z >= bounds_max.z()) continue;
 
-        int bx, by, bz;
-        getBlockFromCoords(bounds_min, p, bx, by, bz);
+            int bx, by, bz;
+            getBlockFromCoords(bounds_min.data(), p, bx, by, bz);
 
-        if (by < 0 || by > sy) continue;
+            if (by < 0 || by > sy) continue;
 
-        int index = getBlockIndex(bx, by, bz, sx, sxz);
+            int index = getBlockIndex(bx, by, bz, sx, sxz);
 
-        blocks[index] = p.classification;
+            blocks[index] = p.classification;
 
-        if (by < minHeight) minHeight = by;
-        if (by > maxHeight) maxHeight = by;
+            psall.addPoint(p);
+            if (p.classification == Classification::GROUND) psground.addPoint(p);
 
-        count++;
+            if (by < minHeight) minHeight = by;
+            if (by > maxHeight) maxHeight = by;
 
-        //fprintf(dp, "{ \"x\": %f, \"y\": %f, \"z\": %f, \"cid\": %d }%s \n", p.x - bounds_min[0], p.y - bounds_min[1], p.z - bounds_min[2], gid, i < num-1 ? "," : "");
+            count++;
 
-        //pp.progress((double)i / num);
+            //fprintf(dp, "{ \"x\": %f, \"y\": %f, \"z\": %f, \"cid\": %d }%s \n", p.x - bounds_min[0], p.y - bounds_min[1], p.z - bounds_min[2], gid, i < num-1 ? "," : "");
 
-        //debugPrint("\n");
+            //pp.progress((double)i / num);
+
+            //debugPrint("\n");
+        }
     }
 
-    debug("building fill");
+    {
+        Timer timer("kdtree - all");
+        psall.build();
+    }
+    {
+        Timer timer("kdtree - ground");
+        psground.build();
+    }
+
+    num = count;
 
     unsigned int *cblocks = blocks.data();
     if (num > 0) {
-        /*
-        //               //
-        // Building fill //
-        //               //
-        for (int i = 0; i < sxyz; i++) {
-            unsigned int &cv = cblocks[i];
-            int c = cv & 0xFF;
-            switch (c) {
-            case Classification::BUILDING:
+        {
+            //               //
+            // Building fill //
+            //               //
+            Timer timer("building fill");
+            for (int i = 0; i < sxyz; i++) {
+                unsigned int &cv = cblocks[i];
+                int c = cv & 0xFF;
+                switch (c) {
+                case Classification::BUILDING:
+                    int bx = i & msx;
+                    int bz = (i >> psx) & msz;
+                    int by = (i >> psx) >> psz;
+                    //if (by > 130) c = Classification::WATER;
+                    //*
+                    int index = i - sxz;
+                    int iy = by - 1;
+                    while (iy > minHeight) {
+                        assert(index > 0);
+                        cblocks[index] = Classification::BUILDING;
+                        index -= sxz;
+                        iy--;
+                    }
+
+                    // Slanted roof search
+                    pcln query_block_center[3] = {
+                        bounds_min.x() + bz + 0.5,
+                        bounds_min.y() + bx + 0.5,
+                        bounds_min.z() + by + 0.5
+                    };
+
+                    const pcln radius = 2;
+                    std::vector<std::pair<size_t, pcln> > indices;
+                    RadiusResultSet<pcln, size_t> points(radius*radius, indices);
+                    psall.findRadius(query_block_center, points);
+
+                    Eigen::Vector3d bcv;
+
+                    bcv << query_block_center[0], query_block_center[1], query_block_center[2];
+
+                    size_t buildingPoints = 0;
+                    size_t slantedPoints = 0;
+                    double avgAngle = 0;
+                    double avgDot = 0;
+                    for (size_t in = 0; in < points.size(); in++) {
+                        std::pair<size_t, pcln> pair = points.m_indices_dists[in];
+                        Point &p = psall.getPoint(pair.first);
+                        if (p.classification != Classification::BUILDING) continue;
+                        Eigen::Vector3d pv(p.x, p.y, p.z);
+                        Eigen::Vector3d rv = pv - bcv;
+                        rv.normalize();
+                        double dot = rv.dot(Eigen::Vector3d::UnitZ());
+                        avgDot += abs(dot);
+                        double angle = acos(dot) * 180 / M_PI;
+                        avgAngle += abs(angle);
+                        if (abs(angle - 45) < 30) slantedPoints++;
+                        buildingPoints++;
+                    }
+                    avgAngle /= buildingPoints;
+                    avgDot /= buildingPoints;
+                    if (avgDot > 0.30) cv = (1 << 31) | 0x47d;
+
+                    break;
+                }
+            }
+        }
+
+        //*
+        {
+            //             //
+            // Ground fill //
+            //             //
+            Timer timer("ground fill");
+            for (int iz = 0; iz < sz; iz++) {
+                for (int ix = 0; ix < sx; ix++) {
+
+                    int bx, by, bz;
+                    bool found = false;
+
+                    for (int iy = 0; iy < sy; iy++) {
+                        if (cblocks[getBlockIndex(ix, iy, iz, sx, sxz)] == Classification::GROUND) {
+                            bx = ix;
+                            by = iy;
+                            bz = iz;
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found) {
+                        pcln query_block_center[3] = {
+                            bounds_min.x() + iz + 0.5,
+                            bounds_min.y() + ix + 0.5,
+                            bounds_min.z() + 0 + 0.5
+                        };
+
+                        size_t ret_index;
+                        pcln out_dist_sqr;
+                        found = psground.findNearest(query_block_center, ret_index, out_dist_sqr);
+
+                        if (found) {
+                            Point &p = psground.getPoint(ret_index);
+                            getBlockFromCoords(bounds_min.data(), p, bx, by, bz);
+                            bx = ix;
+                            bz = iz;
+                        }
+                    }
+
+                    // Extend ground
+                    if (found) {
+                        for (int iy = 0; iy <= by; iy++) {
+                            int index = getBlockIndex(bx, iy, bz, sx, sxz);
+                            cblocks[index] = Classification::GROUND;
+                        }
+                    }
+
+                }
+            }
+        }
+        //*/
+        
+        {
+            //                                          //
+            // Classification + custom blocks -> blocks //
+            //                                          //
+            Timer timer("transform");
+            for (int i = 0; i < sxyz; i++) {
+                unsigned int &cv = cblocks[i];
+
                 int bx = i & msx;
                 int bz = (i >> psx) & msz;
                 int by = (i >> psx) >> psz;
-                //if (by > 130) c = Classification::WATER;
-                //*
-                int index = i - sxz;
-                int iy = by-1;
-                while (iy > minHeight) {
-                    assert(index > 0);
-                    cblocks[index] = Classification::BUILDING;
-                    index -= sxz;
-                    iy--;
-                }
+                if (by > maxHeight) maxHeight = by;
+                if (by < minHeight) minHeight = by;
+                int colindex = bx + bz*sx;
+                int col = columns[colindex];
+                if (by > col) columns[colindex] = by;
 
-
-                pcln query_block_center[3] = {
-                    bounds_min[0] + bz + 0.5,
-                    bounds_min[1] + bx + 0.5,
-                    bounds_min[2] + by + 0.5
-                };
-
-                const pcln radius = 2;
-                std::vector<std::pair<size_t, pcln> > indices;
-                RadiusResultSet<pcln, size_t> points(radius*radius, indices);
-                mc.all->findRadius(query_block_center, points);
-
-                Eigen::Vector3d bcv;
-
-                bcv << query_block_center[0], query_block_center[1], query_block_center[2];
-
-                size_t buildingPoints = 0;
-                size_t slantedPoints = 0;
-                double avgAngle = 0;
-                double avgDot = 0;
-                for (size_t in = 0; in < points.size(); in++) {
-                    std::pair<size_t, pcln> pair = points.m_indices_dists[in];
-                    Point<pcln> &p = mc.all->cloud.pts[pair.first];
-                    if (p.classification != Classification::BUILDING) continue;
-                    Eigen::Vector3d pv(p.x, p.y, p.z);
-                    Eigen::Vector3d rv = pv - bcv;
-                    rv.normalize();
-                    double dot = rv.dot(Eigen::Vector3d::UnitZ());
-                    avgDot += abs(dot);
-                    double angle = acos(dot)*180/M_PI;
-                    avgAngle += abs(angle);
-                    if (abs(angle - 45) < 30) slantedPoints++;
-                    buildingPoints++;
-                }
-                avgAngle /= buildingPoints;
-                avgDot /= buildingPoints;
-                if (avgDot > 0.30) cv = (1 << 31) | 0x47d;
-
-                break;
+                if (cv) cv = classificationToBlock(cv);
+                //c |= (i%0xF) << 16;
             }
-        }
-
-        debug("ground fill");
-
-        //             //
-        // Ground fill //
-        //             //
-        for (int iz = 0; iz < sz; iz++) {
-            for (int ix = 0; ix < sx; ix++) {
-
-                int bx, by, bz;
-                bool found = false;
-
-                for (int iy = 0; iy < sy; iy++) {
-                    if (cblocks[getBlockIndex(ix, iy, iz, sx, sxz)] == Classification::GROUND) {
-                        bx = ix;
-                        by = iy;
-                        bz = iz;
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found) {
-                    pcln query_block_center[3] = {
-                        bounds_min[0] + iz + 0.5,
-                        bounds_min[1] + ix + 0.5,
-                        bounds_min[2] + 0 + 0.5
-                    };
-
-                    size_t ret_index;
-                    pcln out_dist_sqr;
-                    found = mc.ground->findNearest(query_block_center, ret_index, out_dist_sqr);
-
-                    if (found) {
-                        Point<pcln> &p = mc.ground->cloud.pts[ret_index];
-                        getBlockFromCoords(bounds_min, p, bx, by, bz);
-                        bx = ix;
-                        bz = iz;
-                    }
-                }
-
-                // Extend ground
-                if (found) {
-                    for (int iy = 0; iy <= by; iy++) {
-                        int index = getBlockIndex(bx, iy, bz, sx, sxz);
-                        cblocks[index] = Classification::GROUND;
-                    }
-                }
-
-            }
-        }
-        */
-
-        debug("transform");
-
-        //                                          //
-        // Classification + custom blocks -> blocks //
-        //                                          //
-        for (int i = 0; i < sxyz; i++) {
-            unsigned int &cv = cblocks[i];
-            
-            int bx = i & msx;
-            int bz = (i >> psx) & msz;
-            int by = (i >> psx) >> psz;
-            if (by > maxHeight) maxHeight = by;
-            if (by < minHeight) minHeight = by;
-            int colindex = bx + bz*sx;
-            int col = columns[colindex];
-            if (by > col) columns[colindex] = by;
-
-            if (cv) cv = classificationToBlock(cv);
-            //c |= (i%0xF) << 16;
         }
     }
-
-    debug("writing");
 
     //fprintf(dp, "] }");
     //fclose(dp);
@@ -2002,50 +1923,64 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("%d points inside, %d points outside\n", count, num-count);
 
     maxHeight++;
-
     if (count == 0) maxHeight = -2;
 
+    debug("%d points", num);
     debugPrint("%d points\n", count);
 
-    amf::Serializer serializer;
+    {
+        Timer timer("serialization");
+
+        amf::Serializer serializer;
+        serializer << amf::AmfVector<unsigned int>(blocks);
+        serializer << amf::AmfVector<unsigned int>(columns);
+
+        amf::v8 arrays = serializer.data();
+
+        if (!br.data) br.data = new amf::v8();
+        amf::v8 *data = br.data;
+
+        const int intSize = 4;
+        size_t dataSize = 3 * intSize + arrays.size() + 1 * intSize;
+        data->resize(dataSize);
+        vassert(data->size() == dataSize, "%d %d", data->size(), dataSize);
+
+        amf::u8 *p = data->data();
+        writeInt(p, bx); p += intSize;
+        writeInt(p, by); p += intSize;
+        writeInt(p, bz); p += intSize;
+        memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
+        writeInt(p, maxHeight); p += intSize;
+
+        br.valid = true;
+
+        debugPrint("%d bytes\n", data->size());
+
+        debug("%d bytes", data->size());
+    }
     //serializer << amfblocks;
     //serializer << amfcolumns;
 
-    serializer << amf::AmfVector<unsigned int>(blocks);
-    serializer << amf::AmfVector<unsigned int>(columns);
 
-    amf::v8 arrays = serializer.data();
 
-    if (!br.data) br.data = new amf::v8();
 
-    amf::v8 *data = br.data;
 
     //data.clear();
     //data.reserve(3 * 4 + arrays.size() + 1 * 4);
 
-    const int intSize = 4;
 
-    size_t dataSize = 3 * intSize + arrays.size() + 1 * intSize;
     
     //printf(" br %d %d %d ", br.x, br.z, br.valid);
 
     //printf(" bef size() %d, dataSize %d ", data.size(), dataSize);
 
-    data->resize(dataSize);
 
     //printf(" aft size() %d, dataSize %d ", data.size(), dataSize);
 
     //assert(data.size() == dataSize);
 
-    vassert(data->size() == dataSize, "%d %d", data->size(), dataSize);
 
-    amf::u8 *p = data->data();
 
-    writeInt(p, bx); p += intSize;
-    writeInt(p, by); p += intSize;
-    writeInt(p, bz); p += intSize;
-    memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
-    writeInt(p, maxHeight); p += intSize;
 
     //pushInt(data, by);
     //pushInt(data, bz);
@@ -2059,14 +1994,9 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     //data.insert(data.end(), arrays.begin(), arrays.end());
     //pushInt(data, maxHeight);
 
-    br.valid = true;
 
     debugPrint("%d max height\n", maxHeight);
     debugPrint("bx %d  bz %d  by %d\n", bx, bz, by);
-
-    debugPrint("%d bytes\n", data->size());
-
-    debug("%d bytes", data->size());
 
     if (debug) {
         //printArray(conn, static_cast<unsigned char*>(data.data()), data.size());
@@ -2077,6 +2007,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
         printImage(conn, pixels, width, height);
         free(pixels);
     } else {
+        Timer timer("send");
         br.send(conn);
     }
 
@@ -2111,7 +2042,7 @@ void GKOTHandleBoxDebugBoxes(struct mg_connection *conn, void *cbdata, const mg_
     
     int status = mg_write(conn, img.data, img.size);
 
-    if (status == -1) printf("Debug box write error\n");
+    if (status == -1) plog("Debug box write error");
 }
 
 void GKOTHandleDebug(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
@@ -2288,7 +2219,7 @@ GKOTHandler(struct mg_connection *conn, void *cbdata)
         return 0;
     }
 
-    printf("%s %s %s\n", info->request_method, info->request_uri, info->query_string);
+    plog("%s %s %s", info->request_method, info->request_uri, info->query_string);
     
     //printf("%s %s %s %s\n", info->request_method, info->request_uri, info->query_string, status);
 
@@ -2398,12 +2329,12 @@ int main(int argc, char *argv[])
             host = "[::1]";
         }
 
-        printf("Server up at %s://%s:%i/\n", proto, host, ports[n].port);
-        printf("\n");
+        plog("Server up at %s://%s:%i/", proto, host, ports[n].port);
+        plog("");
     }
 
     getMapCloud<pcln>(462, 101);
-    getMapCloud<pcln>(461, 101);
+    //getMapCloud<pcln>(461, 101);
 
     /* Wait until the server should be closed */
     while (!exitNow) {
@@ -2416,8 +2347,8 @@ int main(int argc, char *argv[])
 
     /* Stop the server */
     mg_stop(server);
-    printf("Server stopped.\n");
-    printf("Bye!\n");
+    plog("Server stopped.");
+    plog("Bye!");
 
     return EXIT_SUCCESS;
 
