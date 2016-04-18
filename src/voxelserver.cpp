@@ -13,6 +13,7 @@
 #include <atomic>
 #include <mutex>
 #include <list>
+#include <map>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -43,8 +44,9 @@
 
 #pragma warning(pop)
 
-
 #include "nanoflann.hpp"
+
+#include "ujson/ujson.hpp"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -91,7 +93,7 @@ int exitNow = 0;
 static std::atomic<int> plogLevel = 0;
 #define plog(format, ...) printf("%*s" format "\n", plogLevel*2, " ", __VA_ARGS__)
 
-typedef struct PlogScope
+struct PlogScope
 {
     PlogScope() { plogLevel++; }
     ~PlogScope() { plogLevel--; }
@@ -199,6 +201,78 @@ public:
 };
 #endif
 
+class RuntimeCounter;
+
+class RuntimeCounters {
+
+    typedef std::list<RuntimeCounter*> RCList;
+    std::mutex mutex;
+
+public:
+    RCList list;
+
+    void add(RuntimeCounter *c);
+
+} runtimeCounters;
+
+
+class RuntimeCounter {
+    typedef unsigned long Count;
+
+    std::atomic<Count> count;
+
+public:
+    const char *id;
+    const char *name;
+
+    RuntimeCounter(const char *id, const char *name) : id(id), name(name) {
+        reset();
+        runtimeCounters.add(this);
+    }
+
+    Count operator++() { return ++count; }
+    Count operator+=(Count c) { count += c; return count; }
+
+    Count reset() {
+        Count c = count;
+        count = 0;
+        return c;
+    }
+
+};
+
+
+void RuntimeCounters::add(RuntimeCounter *c) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto &iter : list) { assert(strcmp(iter->id, c->id) != 0); }
+    list.push_back(c);
+}
+
+
+#define ADD_COUNTER(id, name) RuntimeCounter id ## (#id, name);
+
+ujson::value to_json(RuntimeCounters const &rcs) {
+    auto arr = ujson::array();
+    for (auto &iter : rcs.list) {
+        arr.push_back(
+            ujson::object {
+                { "id", iter->id },
+                { "name", iter->name },
+                { "value", static_cast<int>(iter->reset()) }
+            }
+        );
+    }
+    return arr;
+}
+
+
+ADD_COUNTER(boxesSent, "Boxes sent");
+ADD_COUNTER(boxesCreated, "Boxes created");
+ADD_COUNTER(pointsLoaded, "Points loaded");
+ADD_COUNTER(requestsServed, "Requests served");
+
+
+
 /*
 class Mutex {
     CRITICAL_SECTION mutex;
@@ -268,10 +342,12 @@ bool getParamBool(const char *queryString, size_t queryLength, const char *name)
 }
 
 #define debugPrint(...) if (debug) mg_printf(conn, __VA_ARGS__)
-#if 1
+#if 0
 #define debug(format, ...) plog(format, __VA_ARGS__)
+#define dtimer(name) Timer timer(name)
 #else
 #define debug(format, ...) 
+#define dtimer(name)  
 #endif
 
 void printArray(struct mg_connection *conn, unsigned char *data, size_t size, size_t cols = 32)
@@ -392,97 +468,108 @@ struct Point
     unsigned char classification;
 };
 
-template <typename T>
+
 class PointCloud
 {
-    std::mutex mutex;
-    bool preloaded;
+    typedef KDTreeSingleIndexAdaptor<
+        L2_Simple_Adaptor<pcln, PointCloud>, // Distance
+        PointCloud, // Dataset
+        3 // Dimensions
+    > KDTree;
 
+    std::mutex mutex;
 
 public:
     std::vector<Point> pts;
+    KDTree *tree;
 
-    LASreader *reader;
-
-    bool hasBounds;
-    T min[3];
-    T max[3];
-    
-    PointCloud(const char* path) : hasBounds(false), reader(NULL), preloaded(false)
-    {
-        LASreadOpener opener = LASreadOpener();
-        //opener.set_buffer_size(100000000);
-        //opener.set_io_ibuffer_size(262144*1000);
-        opener.set_file_name(path);
-        reader = opener.open();
-        
-        if (!reader) {
-            plog("Unable to open %s", path);
-            exit(1);
-        }
-
-        min[0] = reader->get_min_x(); max[0] = reader->get_max_x();
-        min[1] = reader->get_min_y(); max[1] = reader->get_max_y();
-        min[2] = reader->get_min_z(); max[2] = reader->get_max_z();
+    PointCloud(int maxLeaf) : tree(NULL) {
+        tree = new KDTree(3, *this, KDTreeSingleIndexAdaptorParams(maxLeaf));
     }
 
-    ~PointCloud()
-    {
-        if (reader) delete reader;
-    }
-
-    void setBounds(double min_x, double min_y, double max_x, double max_y)
-    {
-        assert(reader);
-        vassert(reader->inside_none(), "Unable to reset LASreader bounds");
-        vassert(reader->inside_rectangle(min_x, min_y, max_x, max_y), "Unable to set LASreader bounds");
-        min[0] = min_x; max[0] = max_x;
-        min[1] = min_y; max[1] = max_y;
-        hasBounds = true;
-    }
-
-    Vec getQuantizedPoint(double x, double y, double z)
-    {
-        Vec ret;
-        ret << reader->header.get_X(x), reader->header.get_Y(y), reader->header.get_Z(z);
-        return ret;
-    }
-
-    void preload()
-    {
-        preloaded = true;
-        pts.resize(reader->npoints);
-        //pts.resize(1e6);
-        size_t index = 0;
-        while (reader->read_point())
-        {
-            if (index >= pts.size()) break;
-            LASpoint &point = reader->point;
-            Point &p = pts[index];
-            p.x = point.get_X();
-            p.y = point.get_Y();
-            p.z = point.get_Z();
-            p.classification = point.classification;
-            index++;
-        }
+    ~PointCloud() {
+        if (tree) delete tree;
+        tree = NULL;
     }
 
     void addPoint(Point &point)
     {
-        preloaded = true;
         pts.push_back(point);
     }
 
-    void unpreload()
+    Point& getPoint(size_t index)
     {
-        pts.clear();
-        preloaded = false;
+        return pts[index];
     }
 
-    inline void rewind()
+    inline size_t getPointNum() const
     {
-        reader->seek(0);
+        return pts.size();
     }
+
+    void build()
+    {
+        tree->buildIndex();
+    }
+
+    void findRadius(pcln *center, RadiusResultSet<pcln, size_t> &results)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        tree->findNeighbors(results, center, nanoflann::SearchParams(32, 0, false));
+    }
+
+    bool findNearest(pcln *center, size_t &ret_index, pcln &out_dist_sqr)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const int num_results = 1;
+        KNNResultSet<pcln> result(num_results);
+        result.init(&ret_index, &out_dist_sqr);
+        return tree->findNeighbors(result, center, nanoflann::SearchParams());
+    }
+
+    // Must return the number of data points
+    inline size_t kdtree_get_point_count() const
+    {
+        return getPointNum();
+    }
+
+    // Returns the distance between the vector "p1[0:size-1]" and the data point with index "idx_p2" stored in the class:
+    inline pcln kdtree_distance(const pcln *p1, const size_t idx_p2, size_t /*size*/) const
+    {
+        const Point &p = pts[idx_p2];
+        const pcln d0 = p1[0] - p.x;
+        const pcln d1 = p1[1] - p.y;
+        const pcln d2 = p1[2] - p.z;
+        return d0*d0 + d1*d1 + d2*d2;
+    }
+
+    // Returns the dim'th component of the idx'th point in the class:
+    // Since this is inlined and the "dim" argument is typically an immediate value, the
+    //  "if/else's" are actually solved at compile time.
+    inline pcln kdtree_get_pt(const size_t idx, int dim) const
+    {
+        if (dim == 0) return pts[idx].x;
+        else if (dim == 1) return pts[idx].y;
+        else return pts[idx].z;
+    }
+
+    // Optional bounding-box computation: return false to default to a standard bbox computation loop.
+    //   Return true if the BBOX was already computed by the class and returned in "bb" so it can be avoided to redo it again.
+    //   Look at bb.size() to find out the expected dimensionality (e.g. 2 or 3 for point clouds)
+    template <class BBOX>
+    bool kdtree_get_bbox(BBOX& bb) const {
+        return false;
+    }
+
+    template <class BBOX>
+    void kdtree_set_bbox(BBOX& bb) {}
+
+};
+
+class PointCloudIO
+{
+    std::mutex mutex;
+    LASreader *reader;
 
     inline bool readPoint(Point &p)
     {
@@ -497,86 +584,46 @@ public:
         return true;
     }
 
-    inline bool getPoint(long index, Point &p)
+public:
+    PointCloudIO() : reader(NULL) {}
+
+    ~PointCloudIO()
     {
-        if (!reader->seek(index)) return false;
-        return readPoint(p);
-    }
-
-    inline size_t getPointNum() const
-    {
-        return preloaded ? pts.size() : reader->npoints;
-    }
-
-    // Must return the number of data points
-    inline size_t kdtree_get_point_count() const
-    {
-        //return 1e6;
-        return getPointNum();
-    }
-
-    inline bool getNativePoint(const size_t index, LASpoint **p) const
-    {
-        if (!reader->seek(index)) return false;
-        if (!reader->read_point()) return false;
-        *p = &reader->point;
-        return true;
-    }
-
-    // Returns the distance between the vector "p1[0:size-1]" and the data point with index "idx_p2" stored in the class:
-    inline T kdtree_distance(const T *p1, const size_t idx_p2, size_t /*size*/) const
-    {
-        if (preloaded) {
-            const Point &p = pts[idx_p2];
-            const T d0 = p1[0] - p.x;
-            const T d1 = p1[1] - p.y;
-            const T d2 = p1[2] - p.z;
-            return d0*d0 + d1*d1 + d2*d2;
-        }
-
-        LASpoint *p; bool got = getNativePoint(idx_p2, &p); assert(got);
-        const T d0 = p1[0] - p->get_x();
-        const T d1 = p1[1] - p->get_y();
-        const T d2 = p1[2] - p->get_z();
-        return d0*d0 + d1*d1 + d2*d2;
-    }
-
-    // Returns the dim'th component of the idx'th point in the class:
-    // Since this is inlined and the "dim" argument is typically an immediate value, the
-    //  "if/else's" are actually solved at compile time.
-    inline T kdtree_get_pt(const size_t idx, int dim) const
-    {
-        if (preloaded) {
-            if (dim == 0) return pts[idx].x;
-            else if (dim == 1) return pts[idx].y;
-            else return pts[idx].z;
-        }
-        LASpoint *p; bool got = getNativePoint(idx, &p); assert(got);
-        if (dim == 0) return p->get_x();
-        else if (dim == 1) return p->get_y();
-        else return p->get_z();
-    }
-
-    // Optional bounding-box computation: return false to default to a standard bbox computation loop.
-    //   Return true if the BBOX was already computed by the class and returned in "bb" so it can be avoided to redo it again.
-    //   Look at bb.size() to find out the expected dimensionality (e.g. 2 or 3 for point clouds)
-    template <class BBOX>
-    bool kdtree_get_bbox(BBOX& bb) const {
-        if (!hasBounds) return false;
-        bb[0].low = min[0]; bb[0].high = max[0];
-        bb[1].low = min[1]; bb[1].high = max[1];
-        bb[2].low = min[2]; bb[2].high = max[2];
-        return true;
+        close();
     }
     
-    template <class BBOX>
-        void kdtree_set_bbox(BBOX& bb) {
-        if (hasBounds) return;
-        min[0] = bb[0].low; max[0] = bb[0].high;
-        min[1] = bb[1].low; max[1] = bb[1].high;
-        min[2] = bb[2].low; max[2] = bb[2].high;
+    void open(const char *path)
+    {
+        LASreadOpener opener = LASreadOpener();
+        opener.set_file_name(path);
+        reader = opener.open();
+
+        if (!reader) {
+            plog("Unable to open %s", path);
+            exit(1);
+        }
     }
 
+    void close()
+    {
+        if (reader) delete reader;
+        reader = NULL;
+    }
+
+    void load(double min_x, double min_y, double max_x, double max_y, PointCloud *all, PointCloud *ground)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+
+        assert(reader);
+        vassert(reader->inside_none(), "Unable to reset LASreader bounds");
+        vassert(reader->inside_rectangle(min_x, min_y, max_x, max_y), "Unable to set LASreader bounds");
+
+        Point p;
+        while (readPoint(p)) {
+            all->addPoint(p);
+            if (p.classification == Classification::GROUND) ground->addPoint(p);
+        }
+    }
 };
 
 
@@ -776,8 +823,8 @@ static size_t treeReader(const void * ptr, size_t size, size_t count, void *user
 template <typename num_t>
 class PointSearch {
     typedef KDTreeSingleIndexAdaptor<
-        L2_Simple_Adaptor<num_t, PointCloud<num_t>>, // Distance
-        PointCloud<num_t>, // Dataset
+        L2_Simple_Adaptor<num_t, PointCloud>, // Distance
+        PointCloud, // Dataset
         3 // Dimensions
     > KDTree;
 
@@ -789,9 +836,9 @@ class PointSearch {
     std::string treePath;
 
 public:
-    PointCloud<num_t> cloud;
+    PointCloud cloud;
 
-    PointSearch(const char* pclPath, const char* treePath, int maxLeaf) : cloud(PointCloud<num_t>(pclPath)), tree(NULL) {
+    PointSearch(const char* pclPath, const char* treePath, int maxLeaf) : cloud(PointCloud(pclPath)), tree(NULL) {
         this->maxLeaf = maxLeaf;
         this->treePath = treePath;
     }
@@ -875,15 +922,79 @@ public:
 
 };
 
-template <typename num_t>
-struct MapCloud {
-    int lat;
-    int lon;
+#include <condition_variable>
 
-    PointSearch<num_t> *all;
-    PointSearch<num_t> *ground;
+class MapCloud {
+public:
+    static const int READER_NUM = 6;
+    const int lat;
+    const int lon;
 
-    MapCloud() : all(NULL), ground(NULL) {}
+    bool readerFree[READER_NUM];
+    PointCloudIO readers[READER_NUM];
+    int readersFree = READER_NUM;
+
+protected:
+    const char *path;
+
+    std::mutex mutex;
+    std::condition_variable cond;
+public:
+
+    MapCloud(int lat, int lon, const char *path) : 
+        lat(lat), lon(lon),
+        path(path)
+    {
+        open();
+    }
+
+    ~MapCloud() {
+        close();
+    }
+
+    void open() {
+        close();
+        for (int i = 0; i < READER_NUM; i++) {
+            readers[i].open(path);
+            readerFree[i] = true;
+        }
+    }
+
+    void close() {
+        for (int i = 0; i < READER_NUM; i++) {
+            readerFree[i] = false;
+            readers[i].close();
+        }
+    }
+
+    void load(double min_x, double min_y, double max_x, double max_y, PointCloud *all, PointCloud *ground) {
+        int readerIndex = -1;
+        PointCloudIO *reader;
+
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            while (readersFree == 0) cond.wait(lock);
+            for (int i = 0; i < READER_NUM; i++) {
+                if (!readerFree[i]) continue;
+                readerIndex = i;
+                readerFree[readerIndex] = false;
+                reader = &readers[readerIndex];
+                break;
+            }
+            assert(readerIndex != -1);
+            readersFree--;
+        }
+
+        reader->load(min_x, min_y, max_x, max_y, all, ground);
+
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            readerFree[readerIndex] = true;
+            reader = NULL;
+            readersFree++;
+            cond.notify_one();
+        }
+    }
 };
 
 template <typename T>
@@ -936,7 +1047,7 @@ struct SpatialHash
 };
 
 //static SpatialHash<MapCloud<double>> mapCloudHash(2);
-static std::list<MapCloud<pcln>> mapCloudList;
+static std::list<MapCloud*> mapCloudList;
 static std::mutex mapCloudListMutex;
 
 class ProgressPrinter {
@@ -958,8 +1069,7 @@ public:
     }
 };
 
-template <typename num_t>
-MapCloud<num_t>& getMapCloud(int lat, int lon)
+MapCloud* getMapCloud(int lat, int lon)
 {
     /*
     reader->inside_rectangle(
@@ -987,19 +1097,12 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     std::lock_guard<std::mutex> lock(mapCloudListMutex);
     
     for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
-        if (element->lat == lat && element->lon == lon) {
+        if ((*element)->lat == lat && (*element)->lon == lon) {
             return *element;
         }
     }
 
     // Not found, create a new one
-
-    mapCloudList.push_front(MapCloud<num_t>());
-
-    MapCloud<num_t>& mc = mapCloudList.front();
-
-    mc.lat = lat;
-    mc.lon = lon;
 
     plog("");
     plog("Processing new map cloud at %d, %d", lat, lon);
@@ -1012,13 +1115,16 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     sprintf_s(treeAllPath, nanoflannAllPathFormat, lat, lon);
     sprintf_s(treeGroundPath, nanoflannGroundPathFormat, lat, lon);
 
-    if (mc.all) delete mc.all;
-    if (mc.ground) delete mc.ground;
+    MapCloud *mc = new MapCloud(lat, lon, allPath);
+    mapCloudList.push_front(mc);
+
+    //if (mc.all) delete mc.all;
+    //if (mc.ground) delete mc.ground;
 
     plogScope();
 
-    mc.all    = new PointSearch<num_t>(allPath, treeAllPath, 50);
-    mc.ground = new PointSearch<num_t>(groundPath, treeGroundPath, 20);
+    //mc.all    = new PointSearch<num_t>(allPath, treeAllPath, 50);
+    //mc.ground = new PointSearch<num_t>(groundPath, treeGroundPath, 20);
 
     //mc.all->cloud.setPointNum(n);
 
@@ -1067,7 +1173,7 @@ MapCloud<num_t>& getMapCloud(int lat, int lon)
     //mc.ground->buildTree();
 
     plog("Done");
-    return mapCloudList.front();
+    return mc;
 }
 
 static unsigned int classificationToBlock(unsigned int cv)
@@ -1223,6 +1329,34 @@ static void paintRect(unsigned int *pixels, int pixelsWidth, int x, int y, unsig
     }
 }
 
+static void createColumnVis(unsigned int *columns, int sx, int sz, unsigned int **pixels, int &width, int &height)
+{
+    int sxz = sx*sz;
+
+    int imagePadding = 4;
+    int blockPadding = 1;
+    int blockWidth = 10 + blockPadding;
+    int blockHeight = 10 + blockPadding;
+
+    width = imagePadding * 2 + blockWidth * sx;
+    height = imagePadding * 2 + blockHeight * sz;
+    *pixels = (unsigned int*)calloc(width*height, 4);
+
+    for (int iz = 0; iz < sz; iz++) {
+        for (int ix = 0; ix < sx; ix++) {
+            unsigned int rx = imagePadding + ix*blockWidth;
+            unsigned int ry = imagePadding + iz*blockWidth;
+            int colindex = ix + iz*sx;
+            int height = columns[colindex];
+            height = std::min(0xFF, std::max(0, height));
+            unsigned int color = (0 << 16) | (height << 8) | 0;
+            color |= 0xFF000000;
+            paintRect(*pixels, width, rx, ry, color, blockWidth - blockPadding, blockHeight - blockPadding);
+        }
+    }
+
+}
+
 static void createBlockVis(unsigned int *cblocks, int sx, int sy, int sz, unsigned int **pixels, int &width, int &height)
 {
     int sxz = sx*sz;
@@ -1233,16 +1367,16 @@ static void createBlockVis(unsigned int *cblocks, int sx, int sy, int sz, unsign
     int blockHeight = 3;
     int blockLayerPadding = 2;
 
-    width = imagePadding*2 + blockWidth * sx;
-    height = imagePadding*2 + (sz + blockLayerPadding) * sy * blockHeight;
+    width = imagePadding * 2 + blockWidth * sx;
+    height = imagePadding * 2 + (sz + blockLayerPadding) * sy * blockHeight;
     *pixels = (unsigned int*)calloc(width*height, 4);
     /*
     for (int iy = 0; iy < height; iy++) {
-        for (int ix = 0; ix < width; ix++) {
-            (*pixels)[(ix + iy*width) * 3 + 0] = 0x00;
-            (*pixels)[(ix + iy*width) * 3 + 1] = 0xFF;
-            (*pixels)[(ix + iy*width) * 3 + 2] = 0x00;
-        }
+    for (int ix = 0; ix < width; ix++) {
+    (*pixels)[(ix + iy*width) * 3 + 0] = 0x00;
+    (*pixels)[(ix + iy*width) * 3 + 1] = 0xFF;
+    (*pixels)[(ix + iy*width) * 3 + 2] = 0x00;
+    }
     }
     */
     //*
@@ -1323,6 +1457,70 @@ static void renderBoxesUsed(MapImage &img)
     encodeImage(&img, pixels.get(), pixelWidth, pixelHeight);
 }
 
+static void renderMapClouds(MapImage &img)
+{
+    int subtileWidth = 6;
+    int subtileNum = MapCloud::READER_NUM;
+    int border = 1;
+    int tileSize = subtileWidth*subtileNum + border*2;
+    int tileGrid = 10;
+
+    int centerLat = 462;
+    int centerLon = 101;
+
+    int width = tileGrid;
+    int height = width;
+
+    int pixelWidth = width*tileSize;
+    int pixelHeight = height*tileSize;
+
+    size_t pixelsLen = pixelWidth*pixelHeight;
+    std::unique_ptr<unsigned int> pixels((new unsigned int[pixelsLen]()));
+
+    std::lock_guard<std::mutex> lock(mapCloudListMutex);
+
+    paintRect(pixels.get(), pixelWidth,
+        0, 0,
+        0xFF000000,
+        pixelWidth, pixelHeight
+    );
+
+    for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
+        MapCloud &mc = **element;
+
+        int ix = mc.lat - centerLat + width/2 - 1;
+        int iy = mc.lon - centerLon + height/2 - 1;
+
+        if (ix < 0 || ix >= width || iy < 0 || iy >= height) break;
+
+        paintRect(pixels.get(), pixelWidth,
+            ix*tileSize, iy*tileSize,
+            0xFF555555,
+            tileSize, tileSize
+        );
+
+        for (int is = 0; is < subtileNum; is++) {
+                
+            bool free = mc.readerFree[is];
+                
+            char r = free ? 0 : 0xFF;
+            char g = free ? 0xFF : 0;
+            char b = 0;
+
+            unsigned int color = ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+
+            color |= 0xFF000000;
+            paintRect(pixels.get(), pixelWidth,
+                ix*tileSize + border + is * subtileWidth, iy*tileSize + border,
+                color,
+                subtileWidth, tileSize - border*2
+            );
+        }
+    }
+
+    encodeImage(&img, pixels.get(), pixelWidth, pixelHeight);
+}
+
 template <typename num_t>
 static inline void getBlockFromCoords(num_t *origin, Point &p, int &bx, int &by, int &bz)
 {
@@ -1332,107 +1530,6 @@ static inline void getBlockFromCoords(num_t *origin, Point &p, int &bx, int &by,
 }
 
 static std::mutex boxvisMutex;
-
-class TreeSearch {
-
-    typedef KDTreeSingleIndexAdaptor<
-        L2_Simple_Adaptor<pcln, TreeSearch>, // Distance
-        TreeSearch, // Dataset
-        3 // Dimensions
-    > KDTree;
-
-    std::mutex mutex;
-
-    std::vector<Point> pts;
-    KDTree *tree;
-
-public:
-
-    TreeSearch(int maxLeaf) : tree(NULL) {
-        tree = new KDTree(3, *this, KDTreeSingleIndexAdaptorParams(maxLeaf));
-    }
-    ~TreeSearch() {
-        if (tree) delete tree;
-        tree = NULL;
-    }
-
-    void addPoint(Point &point)
-    {
-        pts.push_back(point);
-    }
-
-    Point& getPoint(size_t index)
-    {
-        return pts[index];
-    }
-
-    void build()
-    {
-        tree->buildIndex();
-    }
-
-    void findRadius(pcln *center, RadiusResultSet<pcln, size_t> &results)
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        tree->findNeighbors(results, center, nanoflann::SearchParams(32, 0, false));
-    }
-
-    bool findNearest(pcln *center, size_t &ret_index, pcln &out_dist_sqr)
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        const int num_results = 1;
-        KNNResultSet<pcln> result(num_results);
-        result.init(&ret_index, &out_dist_sqr);
-        return tree->findNeighbors(result, center, nanoflann::SearchParams());
-    }
-
-    inline size_t getPointNum() const
-    {
-        return pts.size();
-    }
-
-    // Must return the number of data points
-    inline size_t kdtree_get_point_count() const
-    {
-        //return 1e6;
-        return getPointNum();
-    }
-
-    // Returns the distance between the vector "p1[0:size-1]" and the data point with index "idx_p2" stored in the class:
-    inline pcln kdtree_distance(const pcln *p1, const size_t idx_p2, size_t /*size*/) const
-    {
-        const Point &p = pts[idx_p2];
-        const pcln d0 = p1[0] - p.x;
-        const pcln d1 = p1[1] - p.y;
-        const pcln d2 = p1[2] - p.z;
-        return d0*d0 + d1*d1 + d2*d2;
-    }
-
-    // Returns the dim'th component of the idx'th point in the class:
-    // Since this is inlined and the "dim" argument is typically an immediate value, the
-    //  "if/else's" are actually solved at compile time.
-    inline pcln kdtree_get_pt(const size_t idx, int dim) const
-    {
-        if (dim == 0) return pts[idx].x;
-        else if (dim == 1) return pts[idx].y;
-        else return pts[idx].z;
-    }
-
-    // Optional bounding-box computation: return false to default to a standard bbox computation loop.
-    //   Return true if the BBOX was already computed by the class and returned in "bb" so it can be avoided to redo it again.
-    //   Look at bb.size() to find out the expected dimensionality (e.g. 2 or 3 for point clouds)
-    template <class BBOX>
-    bool kdtree_get_bbox(BBOX& bb) const {
-        return false;
-    }
-
-    template <class BBOX>
-    void kdtree_set_bbox(BBOX& bb) {
-    }
-
-
-};
-
 
 void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
@@ -1507,6 +1604,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
         br.sx == sx && br.sy == sy && br.sz == sz) {
         
         br.send(conn);
+        boxesSent++;
 
         debug("cache");
 
@@ -1565,12 +1663,11 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     // z -> y
 
 
-    //static const int lat_min = 461, lat_max = 462;
-    //static const int lon_min = 100, lon_max = 101;
+    //static const int lat_min = 461, lat_max = 462, lon_min = 100, lon_max = 101;
+    //static const int lat_min = 462, lat_max = 462, lon_min = 101, lon_max = 101;
+    //static const int lat_min = 460, lat_max = 463, lon_min = 99, lon_max = 102;
+    static const int lat_min = 457, lat_max = 467, lon_min = 96, lon_max = 106;
 
-    static const int lat_min = 462, lat_max = 462;
-    static const int lon_min = 101, lon_max = 101;
-    
     static const int origin_z = 462000;
     static const int origin_x = 101000;
     static const int origin_y = 200;
@@ -1596,10 +1693,8 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     debug("mapcloud get");
 
-    Timer timer_mc("mapcloud");
-    MapCloud<pcln> &mc = getMapCloud<pcln>(lat, lon);
-    timer_mc.print();
-
+    MapCloud &mc = *getMapCloud(lat, lon);
+    
     //printf(" map ");
 
     /*
@@ -1628,11 +1723,6 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     bounds_min << abs_z, abs_x, abs_y;
     bounds_max << abs_z + sz, abs_x + sx, abs_y + sy;
     query_box_center = (bounds_min + bounds_max) / 2;
-
-    {
-        Timer timer("bounds");
-        mc.all->cloud.setBounds(bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
-    }
 
     // 462006. 101005. 462016. 101015.00000000000
 
@@ -1711,17 +1801,28 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     //debugPrint("%d points found\n", num);
 
 
-    TreeSearch psall(50);
-    TreeSearch psground(20);
+    PointCloud all(50);
+    PointCloud ground(20);
 
-    //                      //
-    // Initial quantization //
-    //                      //
+    {
+        //            //
+        // Point load //
+        //            //
+        dtimer("point load");
+        mc.load(bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y(), &all, &ground);
+    }
+
     //for (size_t i = 0; i < num; i++) {
     {
-        Timer timer("quantization");
-        Point p;
-        while (mc.all->cloud.readPoint(p)) {
+        //              //
+        // Quantization //
+        //              //
+        dtimer("quantization");
+        size_t num = all.getPointNum();
+        pointsLoaded += num;
+        for (size_t i = 0; i < num; i++) {
+            Point &p = all.getPoint(i);
+
             //std::pair<size_t, pcln> pair = results.m_indices_dists[i];
             //mc.all->cloud.getPoint(pair.first, p);
             //pcln dist = pair.second;
@@ -1741,9 +1842,6 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
             blocks[index] = p.classification;
 
-            psall.addPoint(p);
-            if (p.classification == Classification::GROUND) psground.addPoint(p);
-
             if (by < minHeight) minHeight = by;
             if (by > maxHeight) maxHeight = by;
 
@@ -1758,23 +1856,24 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     }
 
     {
-        Timer timer("kdtree - all");
-        psall.build();
+        dtimer("kdtree - all");
+        all.build();
     }
     {
-        Timer timer("kdtree - ground");
-        psground.build();
+        dtimer("kdtree - ground");
+        ground.build();
     }
 
     num = count;
 
     unsigned int *cblocks = blocks.data();
     if (num > 0) {
+        /*
         {
             //               //
             // Building fill //
             //               //
-            Timer timer("building fill");
+            dtimer("building fill");
             for (int i = 0; i < sxyz; i++) {
                 unsigned int &cv = cblocks[i];
                 int c = cv & 0xFF;
@@ -1804,7 +1903,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                     const pcln radius = 2;
                     std::vector<std::pair<size_t, pcln> > indices;
                     RadiusResultSet<pcln, size_t> points(radius*radius, indices);
-                    psall.findRadius(query_block_center, points);
+                    all.findRadius(query_block_center, points);
 
                     Eigen::Vector3d bcv;
 
@@ -1816,7 +1915,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                     double avgDot = 0;
                     for (size_t in = 0; in < points.size(); in++) {
                         std::pair<size_t, pcln> pair = points.m_indices_dists[in];
-                        Point &p = psall.getPoint(pair.first);
+                        Point &p = all.getPoint(pair.first);
                         if (p.classification != Classification::BUILDING) continue;
                         Eigen::Vector3d pv(p.x, p.y, p.z);
                         Eigen::Vector3d rv = pv - bcv;
@@ -1836,13 +1935,14 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                 }
             }
         }
+        */
 
-        //*
+        /*
         {
             //             //
             // Ground fill //
             //             //
-            Timer timer("ground fill");
+            dtimer("ground fill");
             for (int iz = 0; iz < sz; iz++) {
                 for (int ix = 0; ix < sx; ix++) {
 
@@ -1868,10 +1968,10 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
                         size_t ret_index;
                         pcln out_dist_sqr;
-                        found = psground.findNearest(query_block_center, ret_index, out_dist_sqr);
+                        found = ground.findNearest(query_block_center, ret_index, out_dist_sqr);
 
                         if (found) {
-                            Point &p = psground.getPoint(ret_index);
+                            Point &p = ground.getPoint(ret_index);
                             getBlockFromCoords(bounds_min.data(), p, bx, by, bz);
                             bx = ix;
                             bz = iz;
@@ -1895,20 +1995,24 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
             //                                          //
             // Classification + custom blocks -> blocks //
             //                                          //
-            Timer timer("transform");
+            dtimer("transform");
             for (int i = 0; i < sxyz; i++) {
                 unsigned int &cv = cblocks[i];
 
                 int bx = i & msx;
                 int bz = (i >> psx) & msz;
                 int by = (i >> psx) >> psz;
-                if (by > maxHeight) maxHeight = by;
-                if (by < minHeight) minHeight = by;
-                int colindex = bx + bz*sx;
-                int col = columns[colindex];
-                if (by > col) columns[colindex] = by;
 
                 if (cv) cv = classificationToBlock(cv);
+
+                if (cv > 0) {
+                    if (by > maxHeight) maxHeight = by;
+                    if (by < minHeight) minHeight = by;
+                    int colindex = bx + bz*sx;
+                    int col = columns[colindex];
+                    if (by > col) columns[colindex] = by;
+                }
+
                 //c |= (i%0xF) << 16;
             }
         }
@@ -1929,7 +2033,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("%d points\n", count);
 
     {
-        Timer timer("serialization");
+        dtimer("serialization");
 
         amf::Serializer serializer;
         serializer << amf::AmfVector<unsigned int>(blocks);
@@ -1998,17 +2102,25 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("%d max height\n", maxHeight);
     debugPrint("bx %d  bz %d  by %d\n", bx, bz, by);
 
+    boxesCreated++;
+
     if (debug) {
         //printArray(conn, static_cast<unsigned char*>(data.data()), data.size());
         unsigned int *pixels;
         int width;
         int height;
+
+        createColumnVis(columns.data(), sx, sz, &pixels, width, height);
+        printImage(conn, pixels, width, height);
+        free(pixels);
+
         createBlockVis(cblocks, sx, sy, sz, &pixels, width, height);
         printImage(conn, pixels, width, height);
         free(pixels);
     } else {
-        Timer timer("send");
+        dtimer("send");
         br.send(conn);
+        boxesSent++;
     }
 
     debugPrint("</pre></body></html>\n");
@@ -2021,28 +2133,53 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     //printf("  GKOT %d, %d, %d   %d bytes\n", bx, by, bz, data.size());
 }
 
-void GKOTHandleBoxDebug(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+void GKOTHandleDashboard(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
-    mg_send_file(conn, "../www/GKOT/boxd/boxDebug.html");
+    mg_send_file(conn, "../www/GKOT/dashboard/dashboard.html");
 }
 
-void GKOTHandleBoxDebugBoxes(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+void sendLiveImageHeader(struct mg_connection *conn, size_t size)
 {
-    //int len = boxHash.size;
-    //int width = (int)(sqrtl(len) + 1);
-
-    MapImage img;
-    renderBoxesUsed(img);
-
     mg_printf(conn,
         "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n"
         NO_CACHE
         "Content-Length: %d\r\n"
-        "\r\n", img.size);
-    
-    int status = mg_write(conn, img.data, img.size);
+        "\r\n", size);
+}
 
+void sendLiveJSONHeader(struct mg_connection *conn, size_t size)
+{
+    mg_printf(conn,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        NO_CACHE
+        "Content-Length: %d\r\n"
+        "\r\n", size);
+}
+
+void GKOTHandleDashboardBoxes(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+{
+    MapImage img;
+    renderBoxesUsed(img);
+    sendLiveImageHeader(conn, img.size);
+    int status = mg_write(conn, img.data, img.size);
     if (status == -1) plog("Debug box write error");
+}
+
+void GKOTHandleDashboardMapClouds(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+{
+    MapImage img;
+    renderMapClouds(img);
+    sendLiveImageHeader(conn, img.size);
+    int status = mg_write(conn, img.data, img.size);
+    if (status == -1) plog("Debug box write error");
+}
+
+void GKOTHandleDashboardStats(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+{
+    ujson::value json = to_json(runtimeCounters);
+    std::string str = ujson::to_string(json);
+    sendLiveJSONHeader(conn, str.size());
+    mg_write(conn, str.data(), str.size());
 }
 
 void GKOTHandleDebug(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
@@ -2204,11 +2341,15 @@ GKOTHandler(struct mg_connection *conn, void *cbdata)
 
     if (strcmp(info->request_uri, "/GKOT/box") == 0) {
         GKOTHandleBox(conn, cbdata, info);
-    } else if (strcmp(info->request_uri, "/GKOT/boxd/") == 0) {
-        GKOTHandleBoxDebug(conn, cbdata, info);
-    } else if (strcmp(info->request_uri, "/GKOT/boxd/boxes.png") == 0) {
-        GKOTHandleBoxDebugBoxes(conn, cbdata, info);
-    } else if (startsWith(info->request_uri, "/GKOT/boxd/")) {
+    } else if (strcmp(info->request_uri, "/GKOT/dashboard/") == 0) {
+        GKOTHandleDashboard(conn, cbdata, info);
+    } else if (strcmp(info->request_uri, "/GKOT/dashboard/boxes.png") == 0) {
+        GKOTHandleDashboardBoxes(conn, cbdata, info);
+    } else if (strcmp(info->request_uri, "/GKOT/dashboard/mapClouds.png") == 0) {
+        GKOTHandleDashboardMapClouds(conn, cbdata, info);
+    } else if (strcmp(info->request_uri, "/GKOT/dashboard/stats.json") == 0) {
+        GKOTHandleDashboardStats(conn, cbdata, info);
+    } else if (startsWith(info->request_uri, "/GKOT/dashboard/")) {
         if (strstr(info->request_uri, "..") != NULL) return 0;
         char path[1024];
         int stored = _snprintf(path, sizeof(path) - 1, "../www/%s", info->request_uri); path[stored] = 0;
@@ -2219,7 +2360,9 @@ GKOTHandler(struct mg_connection *conn, void *cbdata)
         return 0;
     }
 
-    plog("%s %s %s", info->request_method, info->request_uri, info->query_string);
+    requestsServed++;
+
+    plog("%s %s?%s", info->request_method, info->request_uri, info->query_string);
     
     //printf("%s %s %s %s\n", info->request_method, info->request_uri, info->query_string, status);
 
@@ -2333,8 +2476,8 @@ int main(int argc, char *argv[])
         plog("");
     }
 
-    getMapCloud<pcln>(462, 101);
-    //getMapCloud<pcln>(461, 101);
+    //getMapCloud(462, 101);
+    //getMapCloud(461, 101);
 
     /* Wait until the server should be closed */
     while (!exitNow) {

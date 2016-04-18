@@ -10,7 +10,6 @@ file(GLOB inc
 	amf-cpp/types
   
 	nanoflann
-    
 )
 
 file(GLOB src
@@ -28,7 +27,10 @@ file(GLOB src
 
 	nanoflann/nanoflann.hpp
     
-    7zip/*.c
+  7zip/*.c
+  
+	ujson/ujson.cpp
+	ujson/double-conversion.cc
 )
 
 list(REMOVE_ITEM src

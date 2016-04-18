@@ -4785,7 +4785,7 @@ static const struct {
     {".doc", 4, "application/msword"},
     {".eps", 4, "application/postscript"},
     {".exe", 4, "application/octet-stream"},
-    {".js", 3, "application/javascript"},
+    {".js", 3, "application/javascript; charset=utf-8"},
     {".json", 5, "application/json"},
     {".pdf", 4, "application/pdf"},
     {".ps", 3, "application/postscript"},
