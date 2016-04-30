@@ -28,6 +28,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb/stb_image_write.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
 #define BUFFERSIZE 4096
 #include "b64/encode.h"
 
@@ -56,6 +59,7 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include "Winsock2.h"
 #endif
 
 
@@ -64,7 +68,7 @@
 
 
 #define NO_CACHE \
-    "Cache-Control: no-cache, no-store, must-revalidate\r\n" \
+    "Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n" \
     "Pragma: no-cache\r\n" \
     "Expires: 0\r\n"
 
@@ -88,7 +92,7 @@ using namespace nanoflann;
 #endif
 int exitNow = 0;
 
-#define vassert(x, format, ...) if (!x) { printf(format, __VA_ARGS__); __debugbreak(); }
+#define vassert(x, format, ...) if (!(x)) { printf(format, __VA_ARGS__); __debugbreak(); }
 
 static std::atomic<int> plogLevel = 0;
 #define plog(format, ...) printf("%*s" format "\n", plogLevel*2, " ", __VA_ARGS__)
@@ -101,6 +105,8 @@ struct PlogScope
 #define plogScope() PlogScope plog_scope_struct
 
 static const char *gkotPathFormat = "W:/gis/arso/laz/gkot/b_35/D96TM/TM_%d_%d.laz";
+static const char *dof84PathFormat = "W:/gis/arso/dof84/b_35/%d_%d.png";
+
 static const char *otrPathFormat = "W:/gis/arso/laz/otr/b_35/D96TM/TMR_%d_%d.laz";
 static const char *nanoflannAllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.kdz";
 static const char *nanoflannGroundPathFormat = "W:/gis/arso/nanoflann/otr/b_35/D96TM/TM_%d_%d.kdtree";
@@ -110,20 +116,50 @@ typedef Eigen::Vector3d Vec;
 
 enum Classification
 {
-    UNASSIGNED = 1,
-    GROUND = 2,
-    VEGETATION_LOW = 3,
-    VEGETATION_MEDIUM = 4,
-    VEGETATION_HIGH = 5,
-    BUILDING = 6,
-    LOW_POINT = 7,
-    WATER = 9
+    NONE                       = 0,
+    UNASSIGNED                 = 1,
+    GROUND                     = 2,
+    VEGETATION_LOW             = 3,
+    VEGETATION_MEDIUM          = 4,
+    VEGETATION_HIGH            = 5,
+    BUILDING                   = 6,
+    LOW_POINT                  = 7,
+    WATER                      = 9,
+    BUILDING_ROOF_TILED_ORANGE = 70,
+    BUILDING_ROOF_TILED_GRAY   = 71,
+    BUILDING_ROOF_FLAT         = 75,
+    GROUND_ASPHALT             = 80,
+    GROUND_CONCRETE            = 81,
+    SHADOW                     = 90,
+
+    END
 };
 
 enum BlockType
 {
     BLOCK_AIR               = 0,
+    BLOCK_STONE             = 1,
+    BLOCK_GRASS             = 2,
     BLOCK_DIRT              = 3,
+    BLOCK_WATER             = 8,
+    
+    BLOCK_LEAVES                = 0x012,
+    BLOCK_LEAVES_OAK            = 0x012,
+    BLOCK_LEAVES_SPRUCE         = 0x112,
+    BLOCK_LEAVES_BIRCH          = 0x212,
+    BLOCK_LEAVES_JUNGLE         = 0x312,
+    BLOCK_LEAVES_OAK_NDECAY     = 0x412,
+    BLOCK_LEAVES_SPRUCE_NDECAY  = 0x512,
+    BLOCK_LEAVES_BIRCH_NDECAY   = 0x612,
+    BLOCK_LEAVES_JUNGLE_NDECAY  = 0x712,
+    BLOCK_LEAVES_OAK_CDECAY     = 0x812,
+    BLOCK_LEAVES_SPRUCE_CDECAY  = 0x912,
+    BLOCK_LEAVES_BIRCH_CDECAY   = 0xa12,
+    BLOCK_LEAVES_JUNGLE_CDECAY  = 0xb12,
+    BLOCK_LEAVES_OAK_NCDECAY    = 0xc12,
+    BLOCK_LEAVES_SPRUCE_NCDECAY = 0xd12,
+    BLOCK_LEAVES_BIRCH_NCDECAY  = 0xe12,
+    BLOCK_LEAVES_JUNGLE_NCDECAY = 0xf12,
 
     BLOCK_WOOL              = 0x023,
     BLOCK_WOOL_WHITE        = BLOCK_WOOL,
@@ -143,11 +179,116 @@ enum BlockType
     BLOCK_WOOL_RED          = 0xE23,
     BLOCK_WOOL_BLACK        = 0xF23,
 
-    BLOCK_DOUBLE_STONE_SLAB = 43,
+    BLOCK_DOUBLE_SLAB_STONE            = 0x07d,
+    BLOCK_DOUBLE_SLAB_SANDSTONE        = 0x17d,
+    BLOCK_DOUBLE_SLAB_WOODEN           = 0x27d,
+    BLOCK_DOUBLE_SLAB_COBBLESTONE      = 0x37d,
+    BLOCK_DOUBLE_SLAB_BRICKS           = 0x47d,
+    BLOCK_DOUBLE_SLAB_STONE_BRICK      = 0x57d,
+    BLOCK_DOUBLE_SLAB_NETHER_BRICK     = 0x67d,
+    BLOCK_DOUBLE_SLAB_QUARTZ           = 0x77d,
+    BLOCK_DOUBLE_SLAB_SMOOTH_STONE     = 0x87d,
+    BLOCK_DOUBLE_SLAB_SMOOTH_SANDSTONE = 0x97d,
+    BLOCK_DOUBLE_SLAB_TILE_QUARTZ      = 0xf7d,
     
+
+};
+
+static const std::list<std::pair<unsigned int, Classification>> classificationMap = {
+    { 0x1a3f40, Classification::WATER },
+    { 0x404943, Classification::WATER }, // Green
+    { 0x5d7846, Classification::VEGETATION_HIGH },
+    { 0x35502e, Classification::VEGETATION_HIGH },
+    { 0x262127, Classification::VEGETATION_HIGH }, // Bluish
+    { 0x5f7056, Classification::VEGETATION_LOW },
+    { 0x567152, Classification::VEGETATION_LOW },
+    { 0x636e51, Classification::VEGETATION_LOW },
+    { 0x435e3d, Classification::VEGETATION_LOW },
+    { 0x334a2f, Classification::VEGETATION_LOW },
+    { 0xc7a08c, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0x9d695d, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0x725251, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0xc39583, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0xc1937f, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0xae7264, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0x5f666b, Classification::BUILDING_ROOF_TILED_GRAY },
+    { 0x858889, Classification::BUILDING_ROOF_TILED_GRAY },
+    { 0x787170, Classification::BUILDING_ROOF_TILED_GRAY },
+    { 0x8a8787, Classification::BUILDING_ROOF_FLAT },
+    { 0xa7a3a1, Classification::BUILDING_ROOF_FLAT },
+    { 0xb2aeb0, Classification::BUILDING_ROOF_FLAT },
+    { 0xdedcdc, Classification::BUILDING_ROOF_FLAT },
+    { 0x949293, Classification::GROUND_ASPHALT },
+    { 0x858586, Classification::GROUND_ASPHALT },
+    { 0x969392, Classification::GROUND_ASPHALT },
+    { 0x818081, Classification::GROUND_ASPHALT },
+    { 0x858586, Classification::GROUND_ASPHALT },
+    { 0xa3a1a2, Classification::GROUND_ASPHALT },
+    { 0xaaa6a5, Classification::GROUND_ASPHALT },
+    { 0xcac5c7, Classification::GROUND_CONCRETE },
+    { 0xd0cacb, Classification::GROUND_CONCRETE }, 
+    { 0xbfbbba, Classification::GROUND_CONCRETE },
+    // Shadows
+    { 0x040814, Classification::VEGETATION_HIGH }, // Trees
+    { 0x273649, Classification::GROUND_CONCRETE }, // Concrete
+    { 0x253748, Classification::GROUND_CONCRETE }, // Concrete
+    { 0x38414e, Classification::GROUND_ASPHALT }, // Asphalt
+    { 0x1b2b3e, Classification::GROUND_ASPHALT }, // Asphalt
+    { 0x0f1e30, Classification::VEGETATION_LOW }, // Grass
+    { 0x060b25, Classification::WATER }, // Water
+    { 0x0e2231, Classification::WATER }, // Water
+    { 0x132e38, Classification::WATER }, // Water
+    
+    //{ 0x, Classification::SHADOW }, // 
+};
+
+enum ClassificationFlags {
+    DEFAULT  = 0,
+    LARGE = 1
 };
 
 
+static const std::map<Classification, int> classificationFlags = {
+    { Classification::WATER, ClassificationFlags::LARGE }
+};
+
+static const std::map<Classification, std::list<Classification>> classificationSpec = {
+
+    { Classification::GROUND, {
+        Classification::SHADOW,
+        Classification::WATER,
+        Classification::VEGETATION_LOW,
+        Classification::GROUND_ASPHALT,
+        Classification::GROUND_CONCRETE
+    } },
+
+    { Classification::VEGETATION_LOW, {
+        Classification::SHADOW,
+        Classification::WATER,
+        Classification::VEGETATION_LOW,
+        Classification::GROUND_ASPHALT,
+        Classification::GROUND_CONCRETE
+    } },
+
+    { Classification::VEGETATION_MEDIUM, {
+        Classification::VEGETATION_MEDIUM
+    } },
+
+    { Classification::VEGETATION_HIGH, {
+        Classification::VEGETATION_HIGH
+    } },
+
+    { Classification::BUILDING, {
+        Classification::BUILDING_ROOF_TILED_ORANGE,
+        Classification::BUILDING_ROOF_TILED_GRAY,
+        Classification::BUILDING_ROOF_FLAT,
+    } },
+
+    { Classification::LOW_POINT, {
+        Classification::LOW_POINT
+    } },
+
+};
 
 
 #if __cplusplus < 201103L && (!defined(_MSC_VER) || _MSC_VER < 1700)
@@ -299,8 +440,10 @@ public:
 struct MapImage {
     void *data;
     int size;
+    int width;
+    int height;
 
-    MapImage() { data = NULL; }
+    MapImage() : data(NULL), size(0), width(0), height(0) {}
     ~MapImage() {
         if (data) {
             free(data);
@@ -308,6 +451,13 @@ struct MapImage {
         }
     }
 };
+
+void rgbToComponents(unsigned int color, int &r, int &g, int &b)
+{
+    r = (color >> 16) & 0xFF;
+    g = (color >> 8) & 0xFF;
+    b = color & 0xFF;
+}
 
 void writeToBuffer(void *context, void *data, int size) {
     MapImage *img = static_cast<MapImage*>(context);
@@ -610,14 +760,17 @@ public:
         reader = NULL;
     }
 
-    void load(double min_x, double min_y, double max_x, double max_y, PointCloud *all, PointCloud *ground)
+    void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN)
     {
         std::lock_guard<std::mutex> lock(mutex);
 
         assert(reader);
         vassert(reader->inside_none(), "Unable to reset LASreader bounds");
-        vassert(reader->inside_rectangle(min_x, min_y, max_x, max_y), "Unable to set LASreader bounds");
-
+        if (!isnan(min_x) && !isnan(min_y) && !isnan(max_x) && !isnan(max_y)) {
+            vassert(reader->inside_rectangle(min_x, min_y, max_x, max_y), "Unable to set LASreader bounds");
+        }
+        vassert(reader->seek(0), "Unable to seek to start");
+        
         Point p;
         while (readPoint(p)) {
             all->addPoint(p);
@@ -924,6 +1077,13 @@ public:
 
 #include <condition_variable>
 
+struct ClassificationQuery {
+    double x;
+    double y;
+    Classification lidar;
+    int flags;
+};
+
 class MapCloud {
 public:
     static const int READER_NUM = 6;
@@ -934,16 +1094,20 @@ public:
     PointCloudIO readers[READER_NUM];
     int readersFree = READER_NUM;
 
+    MapImage map;
+
 protected:
-    const char *path;
+    const char *lidarPath;
+    const char *mapPath;
 
     std::mutex mutex;
     std::condition_variable cond;
 public:
 
-    MapCloud(int lat, int lon, const char *path) : 
+    MapCloud(int lat, int lon, const char *lidarPath, const char *mapPath) : 
         lat(lat), lon(lon),
-        path(path)
+        lidarPath(lidarPath),
+        mapPath(mapPath)
     {
         open();
     }
@@ -953,10 +1117,25 @@ public:
     }
 
     void open() {
-        close();
-        for (int i = 0; i < READER_NUM; i++) {
-            readers[i].open(path);
-            readerFree[i] = true;
+        plogScope();
+
+        {
+            dtimer("mapcloud readers");
+            close();
+            for (int i = 0; i < READER_NUM; i++) {
+                readers[i].open(lidarPath);
+                readerFree[i] = true;
+            }
+        }
+
+        {
+            dtimer("mapcloud map image");
+
+            int reqComp = 3;
+            int retComp;
+            map.data = stbi_load(mapPath, &map.width, &map.height, &retComp, reqComp);
+            assert(map.data);
+            assert(reqComp == retComp);
         }
     }
 
@@ -965,9 +1144,14 @@ public:
             readerFree[i] = false;
             readers[i].close();
         }
+
+        if (map.data) {
+            stbi_image_free(map.data);
+            map.data = NULL;
+        }
     }
 
-    void load(double min_x, double min_y, double max_x, double max_y, PointCloud *all, PointCloud *ground) {
+    void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN) {
         int readerIndex = -1;
         PointCloudIO *reader;
 
@@ -985,7 +1169,7 @@ public:
             readersFree--;
         }
 
-        reader->load(min_x, min_y, max_x, max_y, all, ground);
+        reader->load(all, ground, min_x, min_y, max_x, max_y);
 
         {
             std::unique_lock<std::mutex> lock(mutex);
@@ -995,6 +1179,104 @@ public:
             cond.notify_one();
         }
     }
+
+    Classification classifyPixel(ClassificationQuery &cq, unsigned int rgb) const {
+        int tr, tg, tb;
+
+        rgbToComponents(rgb, tr, tg, tb);
+
+        long minDist = MAXLONG;
+        Classification minClassification = Classification::NONE;
+
+        const std::list<Classification> *specializesTo = NULL;
+        auto classSpec = classificationSpec.find(cq.lidar);
+        if (classSpec != classificationSpec.end()) specializesTo = &classSpec->second;
+
+        for (auto &iter : classificationMap) {
+            // Skip unspecialized points
+            if (specializesTo && std::find(specializesTo->begin(), specializesTo->end(), iter.second) == specializesTo->end()) continue;
+
+            int iterFlags = 0;
+            auto foundFlags = classificationFlags.find(iter.second);
+            if (foundFlags != classificationFlags.end()) iterFlags = foundFlags->second;
+            // Is this right?
+            //if (iterFlags & !cq.flags) continue;
+
+
+            int mr, mg, mb;
+            rgbToComponents(iter.first, mr, mg, mb);
+
+            int dr = mr - tr;
+            int dg = mg - tg;
+            int db = mb - tb;
+
+            long dist = dr*dr + dg*dg + db*db;
+
+            if (dist < minDist) {
+                minDist = dist;
+                minClassification = iter.second;
+            }
+        }
+
+        return minClassification;
+    }
+
+    Classification getMapPointClassification(ClassificationQuery &cq, int mx, int my) const {
+        if (mx < 0) mx = 0;
+        if (my < 0) my = 0;
+        if (mx >= map.width - 1) mx = map.width - 1;
+        if (my >= map.height - 1) my = map.height - 1;
+
+        unsigned char* md = static_cast<unsigned char*>(map.data);
+
+        int mapIndex = (mx + my * map.width) * 3;
+        unsigned int pixel = (md[mapIndex + 0] << 16) | (md[mapIndex + 1] << 8) | md[mapIndex + 2];
+
+        return classifyPixel(cq, pixel);
+    }
+
+    Classification getSpecializedClassification(ClassificationQuery &cq) const {
+
+        int mx = cq.x - lat*1000;
+        int my = cq.y - lon*1000;
+
+        Classification center = getMapPointClassification(cq, mx, my);
+
+        int flags = 0;
+        auto foundFlags = classificationFlags.find(center);
+        if (foundFlags != classificationFlags.end()) flags = foundFlags->second;
+        
+        const int step = (flags & ClassificationFlags::LARGE) ? 3 : 1;
+        const int range = (flags & ClassificationFlags::LARGE) ? 2 : 0;
+
+        if (range > 0) {
+            int counts[Classification::END] = {};
+            for (int oy = -range; oy <= range; oy++) {
+                for (int ox = -range; ox <= range; ox++) {
+                    if (ox == 0 && oy == 0) continue;
+                    int omx = mx + ox*step;
+                    int omy = my + oy*step;
+                    Classification c = getMapPointClassification(cq, omx, omy);
+                    counts[c]++;
+                }
+            }
+
+            int maxCount = 0;
+            Classification maxClassification;
+            for (int i = 0; i < Classification::END; i++) {
+                int count = counts[i];
+                if (count > maxCount) {
+                    maxCount = count;
+                    maxClassification = static_cast<Classification>(i);
+                }
+            }
+
+            return maxCount > 1 ? maxClassification : center;
+        }
+
+        return center;
+    }
+
 };
 
 template <typename T>
@@ -1107,15 +1389,20 @@ MapCloud* getMapCloud(int lat, int lon)
     plog("");
     plog("Processing new map cloud at %d, %d", lat, lon);
 
-    char allPath[1024], treeAllPath[1024],
-         groundPath[1024], treeGroundPath[1024];
+    char allPath[1024],
+         dof84Path[1024];
+         //treeAllPath[1024],
+         //groundPath[1024],
+         //treeGroundPath[1024];
 
     sprintf_s(allPath, gkotPathFormat, lat, lon);
-    sprintf_s(groundPath, otrPathFormat, lat, lon);
-    sprintf_s(treeAllPath, nanoflannAllPathFormat, lat, lon);
-    sprintf_s(treeGroundPath, nanoflannGroundPathFormat, lat, lon);
+    sprintf_s(dof84Path, dof84PathFormat, lat, lon);
 
-    MapCloud *mc = new MapCloud(lat, lon, allPath);
+    //sprintf_s(groundPath, otrPathFormat, lat, lon);
+    //sprintf_s(treeAllPath, nanoflannAllPathFormat, lat, lon);
+    //sprintf_s(treeGroundPath, nanoflannGroundPathFormat, lat, lon);
+
+    MapCloud *mc = new MapCloud(lat, lon, allPath, dof84Path);
     mapCloudList.push_front(mc);
 
     //if (mc.all) delete mc.all;
@@ -1222,7 +1509,8 @@ static unsigned int classificationToBlock(unsigned int cv)
 
     unsigned int bv;
 
-    if (cv & (1 << 31)) return cv & ~(1 << 31);
+    // Custom blocks
+    //if (cv & (1 << 31)) return cv & ~(1 << 31);
     //if (cv & (1 << 31)) return 0;
 
     int classification = cv & 0xFF;
@@ -1230,16 +1518,30 @@ static unsigned int classificationToBlock(unsigned int cv)
 
     switch (classification)
     {
-    case 0:                                 bv = BLOCK_AIR; break;
+    case Classification::NONE:              bv = BLOCK_AIR; break;
     case Classification::UNASSIGNED:        bv = BLOCK_WOOL; break;
     case Classification::GROUND:            bv = BLOCK_DIRT; break;
-    case Classification::VEGETATION_LOW:    bv = BLOCK_DOUBLE_STONE_SLAB; break;
-    case Classification::VEGETATION_MEDIUM: bv = BLOCK_DOUBLE_STONE_SLAB; break;
+    case Classification::VEGETATION_LOW:    bv = BLOCK_GRASS; break;
+    case Classification::VEGETATION_MEDIUM: bv = BLOCK_LEAVES_SPRUCE; break;
+    case Classification::VEGETATION_HIGH:   bv = BLOCK_LEAVES_OAK; break;
     case Classification::BUILDING:          bv = BLOCK_WOOL_LIGHTGRAY; break;
-    case Classification::VEGETATION_HIGH:   bv = BLOCK_WOOL_GREEN; break;
     case Classification::LOW_POINT:         bv = BLOCK_WOOL_BLACK; break;
-    case Classification::WATER:             bv = BLOCK_WOOL_LIGHTBLUE; break;
-    default:                                bv = BLOCK_WOOL_GRAY; break;
+    case Classification::WATER:             bv = BLOCK_WATER; break;
+
+    /*
+    case Classification::BUILDING_ROOF_TILED_ORANGE: bv = BLOCK_DOUBLE_SLAB_BRICKS; break;
+    case Classification::BUILDING_ROOF_TILED_GRAY:   bv = BLOCK_DOUBLE_SLAB_STONE_BRICK; break;
+    case Classification::BUILDING_ROOF_FLAT:         bv = BLOCK_DOUBLE_SLAB_SMOOTH_STONE; break;
+    */
+
+    case Classification::BUILDING_ROOF_TILED_ORANGE: bv = BLOCK_WOOL_ORANGE; break;
+    case Classification::BUILDING_ROOF_TILED_GRAY:   bv = BLOCK_WOOL_LIGHTGRAY; break;
+    case Classification::BUILDING_ROOF_FLAT:         bv = BLOCK_WOOL_WHITE; break;
+
+    case Classification::GROUND_ASPHALT:    bv = BLOCK_DOUBLE_SLAB_STONE; break;
+    case Classification::GROUND_CONCRETE:   bv = BLOCK_STONE; break;
+    case Classification::SHADOW:            bv = BLOCK_WOOL_GRAY; break;
+    default:                                bv = BLOCK_WOOL_BLACK; break;
     }
 
     //if (bv != BLOCK_DIRT) bv = BLOCK_AIR;
@@ -1286,7 +1588,7 @@ struct BoxResult {
 
 static const long boxHashAccessStart = 0xFF;
 static std::atomic<long> boxHashAccess = boxHashAccessStart;
-static SpatialHash<BoxResult> boxHash(10);
+static SpatialHash<BoxResult> boxHash(11);
 
 static const int blockImage[9] = {
     0xFF, 0xFF, 0xFF,
@@ -1420,6 +1722,13 @@ static inline int getBlockIndex(int bx, int by, int bz, int sx, int sxz)
     return bx + bz*sx + by*sxz;
 }
 
+static inline void getIndexBlock(int index, int &bx, int &by, int &bz, int sx, int sz)
+{
+    bx = index % sx;
+    bz = (index / sx) % sz;
+    by = index / (sx*sz);
+}
+
 static void renderBoxesUsed(MapImage &img)
 {
     int padding = 0;
@@ -1524,12 +1833,34 @@ static void renderMapClouds(MapImage &img)
 template <typename num_t>
 static inline void getBlockFromCoords(num_t *origin, Point &p, int &bx, int &by, int &bz)
 {
-    bx = static_cast<int>(p.y - origin[1]);
+    bx = static_cast<int>(p.x - origin[0]);
     by = static_cast<int>(p.z - origin[2]);
-    bz = static_cast<int>(p.x - origin[0]);
+    bz = 1000 - 1 - static_cast<int>(p.y - origin[1]);
+}
+
+template <typename num_t>
+static inline void getCoordsFromBlock(num_t *origin, int bx, int by, int bz, Point &p)
+{
+    p.x = bx + origin[0];
+    p.y = bz + origin[1];
+    p.z = by + origin[2];
+}
+
+template <typename num_t>
+static inline void getCoordsFromBlock(num_t *origin, int bx, int by, int bz, Vec &v)
+{
+    Point p;
+    getCoordsFromBlock(origin, bx, by, bz, p);
+    v << p.x, p.y, p.z;
 }
 
 static std::mutex boxvisMutex;
+
+
+void getBox(long x, long y, long z, long sx, long sy, long sz) {
+
+}
+
 
 void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
@@ -1584,21 +1915,6 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     long access = ++boxHashAccess;
     br.access = access;
     
-    //std::lock_guard<std::mutex> encodeLock(encodeMutex);
-
-    /*
-    MapImage img;
-    renderBoxesUsed(img);
-
-    char *filename;
-    asprintf(&filename, "../vis/frames/boxvis-%06d.png", access-boxHashAccessStart);
-    FILE *f = fopen(filename, "wb");
-    fwrite(img.data, 1, img.size, f);
-    fclose(f);
-    //*/
-
-    //printf(" box/%x ", boxHashCode);
-
     if (!debug && br.valid &&
         br.x  ==  x && br.y  == y  && br.z  == z &&
         br.sx == sx && br.sy == sy && br.sz == sz) {
@@ -1638,17 +1954,6 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     int sxyz = sx*sy*sz;
     int sxz = sx*sz;
 
-    /*
-    amf::AmfVector<unsigned int> amfblocks;
-    std::vector<unsigned int> &blocks = amfblocks.values;
-    //blocks.resize(sxyz);
-    amfblocks.fixed = true;
-
-    amf::AmfVector<unsigned int> amfcolumns;
-    std::vector<unsigned int> &columns = amfcolumns.values;
-    columns.resize(sxz);
-    amfcolumns.fixed = true;
-    */
 
     std::vector<unsigned int> blocks(sxyz);
     std::vector<unsigned int> columns(sxz);
@@ -1662,154 +1967,104 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     // y -> x
     // z -> y
 
+    //static const int lat_min = 457, lat_max = 467, lon_min = 96, lon_max = 106;
+    static const int lat_min = 462, lat_max = 462, lon_min = 101, lon_max = 101;
 
-    //static const int lat_min = 461, lat_max = 462, lon_min = 100, lon_max = 101;
-    //static const int lat_min = 462, lat_max = 462, lon_min = 101, lon_max = 101;
-    //static const int lat_min = 460, lat_max = 463, lon_min = 99, lon_max = 102;
-    static const int lat_min = 457, lat_max = 467, lon_min = 96, lon_max = 106;
-
+    /*
     static const int origin_z = 462000;
     static const int origin_x = 101000;
     static const int origin_y = 200;
-
-    int abs_x = origin_x + x;
-    int abs_y = origin_y + y;
-    int abs_z = origin_z + z;
-
-    int lat = abs_z / 1000;
-    int lon = abs_x / 1000;
-
-    lat = std::max(std::min(lat, lat_max), lat_min);
-    lon = std::max(std::min(lon, lon_max), lon_min);
-
-    /*
-    unsigned int mapHashCode;
-    MapCloud<double> &mc = mapCloudHash.at(lat, lon, mapHashCode);
-
-    //std::lock_guard<std::recursive_mutex>(mc.mutex);
-
-    ensureMapCloud<double>(mc, lat, lon, mapHashCode);
     */
 
-    debug("mapcloud get");
-
-    MapCloud &mc = *getMapCloud(lat, lon);
-    
-    //printf(" map ");
-
-    /*
     Vec
+        origin,
+        bounds_tl,
+        bounds_br,
         bounds_min,
         bounds_max,
         query_box_center;
 
-    bounds_min = mc.all->cloud.getQuantizedPoint(abs_z, abs_x, abs_y);
-    bounds_max = mc.all->cloud.getQuantizedPoint(abs_z + sz, abs_x + sx, abs_y + sy);
+    origin << 462000, 101000 + 1000 - 1, 200;
+
+    getCoordsFromBlock(origin.data(), x, y, z, bounds_tl);
+    getCoordsFromBlock(origin.data(), x+sx, y+sy, z+sz, bounds_br);
+
+    bounds_min = bounds_tl.cwiseMin(bounds_br);
+    bounds_max = bounds_tl.cwiseMax(bounds_br);
+
     query_box_center = (bounds_min + bounds_max) / 2;
-    //*/
 
     /*
-    Vec bmin, bmax;
-    bmin << abs_z, abs_x, abs_y;
-    bmax << abs_z + sz, abs_x + sx, abs_y + sy;
-
-    mc.all->cloud.setBounds(bmin.x(), bmin.y(), bmax.x(), bmax.y());
-    */
-
-    Vec
-        bounds_min,
-        bounds_max,
-        query_box_center;
     bounds_min << abs_z, abs_x, abs_y;
     bounds_max << abs_z + sz, abs_x + sx, abs_y + sy;
     query_box_center = (bounds_min + bounds_max) / 2;
+    */
 
     // 462006. 101005. 462016. 101015.00000000000
 
-    /*
-    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
-    printf("ins rec %d\n", mc.all->cloud.reader->inside_rectangle(462005., 101005, 462010., 101010.));
-    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
-    printf("read point %d\n", mc.all->cloud.reader->read_point());
-    printf("%f %f\n", mc.all->cloud.reader->point.get_x(), mc.all->cloud.reader->point.get_y());
-
-    printf("ins none %d\n", mc.all->cloud.reader->inside_none());
-
-    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
-    printf("ins rec %d\n", mc.all->cloud.reader->inside_rectangle(462030., 101030., 462040., 101040.));
-    //printf("seek %d\n", mc.all->cloud.reader->seek(0));
-    printf("read point %d\n", mc.all->cloud.reader->read_point());
-    printf("%f %f\n", mc.all->cloud.reader->point.get_x(), mc.all->cloud.reader->point.get_y());
-    //*/
-
-    /*
-    pcln bounds_min[3] = {
-        abs_z,
-        abs_x,
-        abs_y
-    };
-
-    pcln bounds_max[3] = {
-        bounds_min[0] + sz,
-        bounds_min[1] + sx,
-        bounds_min[2] + sy
-    };
-
-    pcln query_box_center[3] = {
-        (bounds_min[0] + bounds_max[0])*0.5,
-        (bounds_min[1] + bounds_max[1])*0.5,
-        (bounds_min[2] + bounds_max[2])*0.5
-    };
-    //*/
-
-    //ProgressPrinter pp;
-
-    //FILE *dp = fopen("data.json", "w");
-    //fprintf(dp, "{ \"points\": [\n");
-
-    // YZX
-    // uint element value
-    // 0x000000FF	block id
-    // 0x00000F00	block data
-    // 0x0000F000	skylight
-    // 0x000F0000	blocklight
-    // 0x0FF00000	? height of column (stored at y = 0)
-
-    //Timer timer;
-
-    //timer.tick();
-
-    /*
-    const pcln radius = sy/2 + 1;
-    std::vector<std::pair<size_t, pcln>> indices;
-    RadiusResultSet<pcln, size_t> results(radius*radius, indices);
-    mc.all->findRadius(query_box_center.data(), results);
-    */
-    
-    //mc.all->tree->findNeighbors(resultSet, query_box_center, nanoflann::SearchParams(32, 0, false));
-
-    //mapCloudHash.mutex.unlock();
-
-    //mc.mutex.unlock();
-
-    //size_t num = results.size();
-
     size_t num = 0;
-
-    //debugPrint("%d query took %d ms\n", timer.tock().count());
-
-    //debugPrint("%d points found\n", num);
-
 
     PointCloud all(50);
     PointCloud ground(20);
+    MapCloud *mapCloud;
 
     {
         //            //
         // Point load //
         //            //
         dtimer("point load");
-        mc.load(bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y(), &all, &ground);
+        
+        const int cornerNum = 4;
+        const int corners[cornerNum][2] = {
+            { bounds_min.x(), bounds_min.y() }, { bounds_max.x(), bounds_min.y() },
+            { bounds_min.x(), bounds_max.y() }, { bounds_max.x(), bounds_max.y() }
+            //{ abs_z + 00, abs_x + 00 }, { abs_z + sz, abs_x + 00 },
+            //{ abs_z + 00, abs_x + sx }, { abs_z + sz, abs_x + sx }
+        };
+
+        int latlonCount = 0;
+        int latlon[cornerNum][2];
+
+        /*
+        const int offsets = {
+            { -1, -1 }, {  0, -1 }, {  1, -1 },
+            { -1,  0 }, {  0,  0 }, {  1,  0 },
+            { -1,  1 }, {  0,  1 }, {  1,  1 },
+        };
+        */
+
+        for (int i = 0; i < cornerNum; i++) {
+            int lat = corners[i][0] / 1000;
+            int lon = corners[i][1] / 1000;
+
+            lat = std::max(std::min(lat, lat_max), lat_min);
+            lon = std::max(std::min(lon, lon_max), lon_min);
+
+            bool duplicate = false;
+            for (int j = 0; j < latlonCount; j++) {
+                if (latlon[j][0] == lat && latlon[j][1] == lon) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+
+            latlon[latlonCount][0] = lat;
+            latlon[latlonCount][1] = lon;
+            latlonCount++;
+        }
+
+        debug("mapcloud get");
+
+        for (int i = 0; i < latlonCount; i++) {
+            int lat = latlon[i][0];
+            int lon = latlon[i][1];
+            MapCloud *mc = getMapCloud(lat, lon);
+            mc->load(&all, &ground, bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
+            if (i == 0) mapCloud = mc;
+        }
+
+        //
     }
 
     //for (size_t i = 0; i < num; i++) {
@@ -1829,9 +2084,11 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
             //debugPrint("%6d  %6f  %6f  %6f  %d    %6f", i, p.x, p.y, p.z, p.classification, dist);
 
+            /*
             if (p.x < bounds_min.x() || p.x >= bounds_max.x() ||
                 p.y < bounds_min.y() || p.y >= bounds_max.y() ||
                 p.z < bounds_min.z() || p.z >= bounds_max.z()) continue;
+            */
 
             int bx, by, bz;
             getBlockFromCoords(bounds_min.data(), p, bx, by, bz);
@@ -1864,9 +2121,48 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
         ground.build();
     }
 
+
     num = count;
 
     unsigned int *cblocks = blocks.data();
+
+    //*
+    // Debug / testing
+    for (int i = 0; i < sxyz; i++) {
+        unsigned int &cv = cblocks[i];
+        int bx, by, bz;
+        getIndexBlock(i, bx, by, bz, sx, sz);
+
+        if (by == 5) {
+
+
+            Classification lidar = NONE;
+            for (int iy = 0; iy < sy; iy++) {
+                int ind = getBlockIndex(bx, iy, bz, sx, sxz);
+                Classification lid = static_cast<Classification>(cblocks[ind]);
+                if (lid != 0) lidar = lid;
+            }
+
+            Point cqp;
+            getCoordsFromBlock(bounds_min.data(), bx, by, bz, cqp);
+            getBlockFromCoords(origin.data(), cqp, bx, by, bz);
+            bz = 1000 - bz;
+            getCoordsFromBlock(origin.data(), bx, by, bz, cqp);
+
+            ClassificationQuery cq;
+            cq.x = cqp.x;
+            cq.y = cqp.y;
+            cq.lidar = lidar;
+            cq.flags = ClassificationFlags::DEFAULT;
+            cv = mapCloud->getSpecializedClassification(cq);
+        }
+        else {
+            cv = Classification::NONE;
+        }
+
+    }
+    //*/
+
     if (num > 0) {
         /*
         {
@@ -1879,9 +2175,11 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                 int c = cv & 0xFF;
                 switch (c) {
                 case Classification::BUILDING:
-                    int bx = i & msx;
-                    int bz = (i >> psx) & msz;
-                    int by = (i >> psx) >> psz;
+
+                    int bx, by, bz;
+
+                    getIndexBlock(i, bx, by, bz, sx, sz);
+
                     //if (by > 130) c = Classification::WATER;
                     //*
                     int index = i - sxz;
@@ -1892,6 +2190,25 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                         index -= sxz;
                         iy--;
                     }
+                    
+                    //cv = bz % 2 == 0 ? Classification::BUILDING_ROOF_TILED_ORANGE : Classification::BUILDING_ROOF_TILED_GRAY;
+
+                    
+                    Point cqp;
+                    getCoordsFromBlock(bounds_min.data(), bx, by, bz, cqp);
+                    getBlockFromCoords(origin.data(), cqp, bx, by, bz);
+                    bz = 1000 - bz;
+                    getCoordsFromBlock(origin.data(), bx, by, bz, cqp);
+
+                    ClassificationQuery cq;
+                    cq.x = cqp.x;
+                    cq.y = cqp.y;
+                    cq.lidar = Classification::BUILDING;
+                    cq.flags = ClassificationFlags::DEFAULT;
+                    cv = mapCloud->getSpecializedClassification(cq);
+                    
+
+                    break;
 
                     // Slanted roof search
                     pcln query_block_center[3] = {
@@ -1931,11 +2248,10 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                     avgDot /= buildingPoints;
                     if (avgDot > 0.30) cv = (1 << 31) | 0x47d;
 
-                    break;
                 }
             }
         }
-        */
+        //*/
 
         /*
         {
@@ -1960,15 +2276,16 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                     }
 
                     if (!found) {
-                        pcln query_block_center[3] = {
-                            bounds_min.x() + iz + 0.5,
-                            bounds_min.y() + ix + 0.5,
-                            bounds_min.z() + 0 + 0.5
-                        };
+
+                        Vec query_block_center;
+                        getCoordsFromBlock(bounds_min.data(), ix, 0, iz, query_block_center);
+
+                        Vec block_center; block_center << 0.5, 0.5, 0.5;
+                        query_block_center += block_center;
 
                         size_t ret_index;
                         pcln out_dist_sqr;
-                        found = ground.findNearest(query_block_center, ret_index, out_dist_sqr);
+                        found = ground.findNearest(query_block_center.data(), ret_index, out_dist_sqr);
 
                         if (found) {
                             Point &p = ground.getPoint(ret_index);
@@ -1978,10 +2295,14 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
                         }
                     }
 
+                    if (by < 0) by = 0;
+                    if (by >= sy) by = sy-1;
+
                     // Extend ground
                     if (found) {
                         for (int iy = 0; iy <= by; iy++) {
                             int index = getBlockIndex(bx, iy, bz, sx, sxz);
+                            //vassert(index >= 0 && index < sxyz, "Block index out of range: %d (%d %d %d)", index, bx, iy, bz);
                             cblocks[index] = Classification::GROUND;
                         }
                     }
@@ -1990,7 +2311,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
             }
         }
         //*/
-        
+
         {
             //                                          //
             // Classification + custom blocks -> blocks //
@@ -2328,8 +2649,263 @@ void GKOTHandleDebug(struct mg_connection *conn, void *cbdata, const mg_request_
 }
 
 
+void GKOTHandleDebugBoxes(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+{
+	mg_printf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
+	mg_printf(conn, "<html><body>");
+	mg_printf(conn, "Box debug!<pre>");
+
+	MapCloud *mc = getMapCloud(462, 101);
+
+	int mw = 1000;
+	int mh = mw;
+
+	PointCloud all(50);
+	PointCloud ground(20);
+
+	mc->load(&all, &ground);
+
+	double origin[3] = {
+		462000,
+		101000,
+		0
+	};
+
+	int *classMap = (int*)calloc(sizeof(int)*mw*mh, 1);
+
+	int count = 0;
+	size_t pointNum = all.getPointNum();
+	for (size_t i = 0; i < pointNum; i++) {
+		Point &p = all.getPoint(i);
+		int bx, by, bz;
+		getBlockFromCoords(origin, p, bx, by, bz);
+		int index = getBlockIndex(bx, 0, bz, mw, mw*mh);
+		int v = classMap[index];
+		int vy = v & 0xFFFF;
+		if (by > vy) {
+			classMap[index] = (p.classification << 16) | by;
+		}
+		count++;
+	}
+
+	mg_printf(conn, "%d points\n", count);
+
+	mg_printf(conn, "</pre>", count);
+
+	unsigned int *pixels;
+	int width = mw;
+	int height = mh;
+
+	pixels = (unsigned int*)calloc(width*height, 4);
+
+	assert(pixels);
+	for (int i = 0; i < mw*mh; i++) {
+		int v = classMap[i];
+		int vz = v & 0xFFFF;
+		Classification vclass = static_cast<Classification>((v >> 16) & 0xFF);
+
+		double x = origin[0] + (i % mw);
+		double y = origin[1] + (i / mw);
+
+		unsigned int rgb;
+
+		switch (vclass)
+		{
+		case Classification::GROUND:
+			rgb = 0x964B00;
+			break;
+		case Classification::VEGETATION_LOW:
+			rgb = 0x11772d;
+			break;
+		case Classification::VEGETATION_MEDIUM:
+			rgb = 0x12ae3e;
+			break;
+		case Classification::VEGETATION_HIGH:
+			rgb = 0x08d542;
+			break;
+		case Classification::BUILDING:
+			rgb = 0xB2ACAB;
+			break;
+		case Classification::BUILDING_ROOF_TILED_ORANGE:
+			rgb = 0xEA8825;
+			break;
+		case Classification::BUILDING_ROOF_TILED_GRAY:
+			rgb = 0x586261;
+			break;
+		case Classification::BUILDING_ROOF_FLAT:
+			rgb = 0xC8C8C8;
+			break;
+		case Classification::GROUND_ASPHALT:
+			rgb = 0x626C78;
+			break;
+		case Classification::GROUND_CONCRETE:
+			rgb = 0xB5B1A8;
+			break;
+		case Classification::LOW_POINT:
+			rgb = 0x433F40;
+			break;
+		case Classification::SHADOW:
+			rgb = 0x101010;
+			break;
+		case Classification::WATER:
+			rgb = 0x0481ec;
+			break;
+		default:
+			rgb = 0x000000;
+			break;
+		}
+
+		rgb = (rgb << 8) | 0xFF;
+
+		rgb = htonl(rgb);
+
+		pixels[i] = rgb;
+	}
+
+	printImage(conn, pixels, width, height);
+	free(pixels);
+
+	mg_printf(conn, "</body></html>\n");
+}
+
+
+void DOF84HandleDebug(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+{
+    mg_printf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
+    mg_printf(conn, "<html><body>");
+    mg_printf(conn, "Hello!<pre>");
+    
+    MapCloud *mc = getMapCloud(462, 101);
+
+    int mw = 1000;
+    int mh = mw;
+
+    PointCloud all(50);
+    PointCloud ground(20);
+
+    mc->load(&all, &ground);
+
+    double origin[3] = {
+        462000,
+        101000,
+        0
+    };
+
+    unsigned char *map = static_cast<unsigned char*>(mc->map.data);
+    assert(map);
+
+    int *classMap = (int*)calloc(sizeof(int)*mw*mh, 1);
+
+    int count = 0;
+    size_t pointNum = all.getPointNum();
+    for (size_t i = 0; i < pointNum; i++) {
+        Point &p = all.getPoint(i);
+        int bx, by, bz;
+        getBlockFromCoords(origin, p, bx, by, bz);
+        //int index = bx + bz*mw;
+        int index = getBlockIndex(bx, 0, bz, mw, mw*mh);
+        int v = classMap[index];
+        int vy = v & 0xFFFF;
+        if (by > vy) {
+            classMap[index] = (p.classification << 16) | by;
+        }
+        //if (count < 100) mg_printf(conn, "%d, %d, %d -> %d\n", bx, by, v, bz);
+        //if (count < 100) mg_printf(conn, "%d, %d, %d classification %d\n", bx, by, bz, point->classification);
+        count++;
+        //if (count > 500000) break;
+    }
+
+    mg_printf(conn, "%d points\n", count);
+
+    mg_printf(conn, "</pre>", count);
+
+    unsigned int *pixels;
+    int width = mw;
+    int height = mh;
+
+    pixels = (unsigned int*)calloc(width*height, 4);
+
+    assert(pixels);
+    for (int i = 0; i < mw*mh; i++) {
+        int v = classMap[i];
+        int vz = v & 0xFFFF;
+        Classification vclass = static_cast<Classification>((v >> 16) & 0xFF);
+        //if (i < 100) mg_printf(conn, "%d %d %d %d\n", i, v, zs, ze);
+
+        double x = origin[0] + (i % mw);
+        double y = origin[1] + (i / mw);
+
+        //vclass = classifyPixel(pixel, static_cast<Classification>(vclass));
+
+        ClassificationQuery cq = { x, y, vclass, ClassificationFlags::DEFAULT };
+        //vclass = mc->getSpecializedClassification(cq);
+
+        unsigned int rgb;
+
+        switch (vclass)
+        {
+        case Classification::GROUND:
+            rgb = 0x964B00;
+            break;
+        case Classification::VEGETATION_LOW:
+            rgb = 0x11772d;
+            break;
+        case Classification::VEGETATION_MEDIUM:
+            rgb = 0x12ae3e;
+            break;
+        case Classification::VEGETATION_HIGH:
+            rgb = 0x08d542;
+            break;
+        case Classification::BUILDING:
+            rgb = 0xB2ACAB;
+            break;
+        case Classification::BUILDING_ROOF_TILED_ORANGE:
+            rgb = 0xEA8825;
+            break;
+        case Classification::BUILDING_ROOF_TILED_GRAY:
+            rgb = 0x586261;
+            break;
+        case Classification::BUILDING_ROOF_FLAT:
+            rgb = 0xC8C8C8;
+            break;
+        case Classification::GROUND_ASPHALT:
+            rgb = 0x626C78;
+            break;
+        case Classification::GROUND_CONCRETE:
+            rgb = 0xB5B1A8;
+            break;
+        case Classification::LOW_POINT:
+            rgb = 0x433F40;
+            break;
+        case Classification::SHADOW:
+            rgb = 0x101010;
+            break;
+        case Classification::WATER:
+            rgb = 0x0481ec;
+            break;
+        default:
+            rgb = 0x000000;
+            break;
+        }
+
+        //rgb = mc->getSpecializedClassification(cq);
+
+        rgb = (rgb << 8) | 0xFF;
+
+        rgb = htonl(rgb);
+
+        pixels[i] = rgb;
+    }
+
+    printImage(conn, pixels, width, height);
+    free(pixels);
+
+    mg_printf(conn, "</body></html>\n");
+}
+
+
 int
-GKOTHandler(struct mg_connection *conn, void *cbdata)
+MainHandler(struct mg_connection *conn, void *cbdata)
 {
     //mapCloudHash.mutex.lock();
 
@@ -2356,6 +2932,10 @@ GKOTHandler(struct mg_connection *conn, void *cbdata)
         mg_send_file(conn, path);
     } else if (strcmp(info->request_uri, "/GKOT/debug") == 0) {
         GKOTHandleDebug(conn, cbdata, info);
+    } else if (strcmp(info->request_uri, "/GKOT/debugBoxes") == 0) {
+        GKOTHandleDebugBoxes(conn, cbdata, info);
+    } else if (strcmp(info->request_uri, "/dof84") == 0) {
+        DOF84HandleDebug(conn, cbdata, info);
     } else {
         return 0;
     }
@@ -2449,10 +3029,7 @@ int main(int argc, char *argv[])
     memset(&callbacks, 0, sizeof(callbacks));
     server = mg_start(&callbacks, 0, options);
 
-
-
-    /* Add handler EXAMPLE_URI, to explain the example */
-    mg_set_request_handler(server, "/GKOT/", GKOTHandler, 0);
+    mg_set_request_handler(server, "/", MainHandler, 0);
 
     /* List all listening ports */
     memset(ports, 0, sizeof(ports));

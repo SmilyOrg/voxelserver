@@ -1,0 +1,12 @@
+{
+  "name": "gis-arso",
+  "version": "1.0.0",
+  "description": "",
+  "main": "grab-lidar.js",
+  "dependencies": {
+    "node-dbf": "^0.1.0"
+  },
+  "devDependencies": {},
+  "author": "",
+  "license": "ISC"
+}
