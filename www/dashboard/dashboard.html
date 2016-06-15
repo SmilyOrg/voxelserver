@@ -1,11 +1,17 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <link rel="stylesheet" type="text/css" href="semantic/semantic.min.css">
+        <link rel="stylesheet" type="text/css" href="../semantic/semantic.min.css">
+        <link href="js/vendor/nv.d3.min.css" rel="stylesheet">
         <style>
             body {
                 padding: 10px;
             }
+            
+            #execTime {
+                margin: 20px 0;
+            }
+            
             /*
             div {
                 padding: 10px;
@@ -20,6 +26,20 @@
         
         
         <div id="stats" class="ui statistics">
+        </div>
+        
+        <div class="ui segment">
+            <div class="ui grid">
+                <div class="three wide column">
+                    <div id="execTimeLabels" class="ui labels"></div>
+                </div>
+                <div class="seven wide column">
+                    <canvas id="execTime" height="340px" />  
+                </div>
+                <div class="six wide column">
+                    <div id="execTimeBars"><svg height="400px" /></div>
+                </div>
+            </div>
         </div>
         
         <div class="ui cards">
@@ -46,7 +66,9 @@
 
         <script src="js/vendor/jquery-2.2.1.js"></script>
         <script src="js/vendor/d3.js"></script>
-        <script src="semantic/semantic.min.js"></script>
+        <script src="js/vendor/nv.d3.min.js"></script>
+        <script src="js/vendor/smoothie.js"></script>
+        <script src="../semantic/semantic.min.js"></script>
         <script src="js/main.js"></script>
     </body>
 

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <link rel="stylesheet" type="text/css" href="../semantic/semantic.min.css">
+        <style>
+            body {
+                padding: 10px;
+            }
+            
+            .tiles {
+                background-color: snow;
+            }
+            
+            .tiles td {
+                line-height: 0;
+                /*border: 1px dashed gray;*/
+                border: none;
+                box-sizing: border-box;
+                position: relative;
+            }
+            
+            .tiles td .ui.label {
+                position: absolute;
+                top: 5px;
+                left: 5px;
+                opacity: 0.5;
+                z-index: 10;
+            }
+            
+            .tiles td img.map {
+                position: absolute;
+                top: 0;
+                left: 0;
+                
+                opacity: 0.5;
+            }
+        </style>
+    </head>
+    <body>
+        
+        <table class="tiles" id="tiles-lidar"></table>
+        <table class="tiles" id="tiles-map"></table>
+        
+        <script src="js/vendor/jquery-2.2.1.js"></script>
+        <script src="js/vendor/d3.js"></script>
+        <script src="../semantic/semantic.min.js"></script>
+        <script src="js/main.js"></script>
+    </body>
+
+</html>

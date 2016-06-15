@@ -75,10 +75,14 @@
 #endif
 
 
+#include <assert.h>
+
 /* This code uses static_assert to check some conditions.
  * Unfortunately some compilers still do not support it, so we have a
  * replacement function here. */
-#if defined(_MSC_VER) && (_MSC_VER >= 1600)
+#if defined(__clang__)
+#define mg_static_assert _Static_assert
+#elif defined(_MSC_VER) && (_MSC_VER >= 1600)
 #define mg_static_assert static_assert
 #elif defined(__cplusplus) && (__cplusplus >= 201103L)
 #define mg_static_assert static_assert
@@ -2342,17 +2346,15 @@ mg_get_response_code_text(int response_code, struct mg_connection *conn)
 	}
 }
 
-
 static void send_http_error(struct mg_connection *,
                             int,
                             PRINTF_FORMAT_STRING(const char *fmt),
                             ...) PRINTF_ARGS(3, 4);
 
 static void
-send_http_error(struct mg_connection *conn, int status, const char *fmt, ...)
+send_http_error_va(struct mg_connection *conn, int status, const char *fmt, va_list ap)
 {
 	char buf[MG_BUF_LEN];
-	va_list ap;
 	int len, i, page_handler_found, scope, truncated;
 	char date[64];
 	time_t curtime = time(NULL);
@@ -2454,9 +2456,7 @@ send_http_error(struct mg_connection *conn, int status, const char *fmt, ...)
 			mg_printf(conn, "Error %d: %s\n", status, status_text);
 
 			if (fmt != NULL) {
-				va_start(ap, fmt);
 				mg_vsnprintf(conn, NULL, buf, sizeof(buf), fmt, ap);
-				va_end(ap);
 				mg_write(conn, buf, strlen(buf));
 				DEBUG_TRACE("Error %i - [%s]", status, buf);
 			}
@@ -2467,6 +2467,26 @@ send_http_error(struct mg_connection *conn, int status, const char *fmt, ...)
 		}
 	}
 }
+
+static void
+send_http_error(struct mg_connection *conn, int status, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	send_http_error_va(conn, status, fmt, ap);
+	va_end(ap);
+}
+
+void
+mg_send_http_error(struct mg_connection *conn, int status, const char *fmt, ...)
+{
+	va_list ap;
+	
+	va_start(ap, fmt);
+	send_http_error_va(conn, status, fmt, ap);
+	va_end(ap);
+}
+
 
 #if defined(_WIN32) && !defined(__SYMBIAN32__)
 /* Create substitutes for POSIX functions in Win32. */

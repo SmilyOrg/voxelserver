@@ -974,6 +974,10 @@ CIVETWEB_API int mg_get_response(struct mg_connection *conn,
 */
 CIVETWEB_API unsigned mg_check_feature(unsigned feature);
 
+CIVETWEB_API void mg_send_http_error(struct mg_connection *conn,
+	                                 int status,
+									 PRINTF_FORMAT_STRING(const char *fmt),
+                                     ...) PRINTF_ARGS(3, 4);
 
 #ifdef __cplusplus
 }

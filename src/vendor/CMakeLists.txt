@@ -27,7 +27,7 @@ file(GLOB src
 
 	nanoflann/nanoflann.hpp
     
-  7zip/*.c
+#   7zip/*.c
   
 	ujson/ujson.cpp
 	ujson/double-conversion.cc

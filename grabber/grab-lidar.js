@@ -7,65 +7,131 @@ var async = require('async');
 var exec = require('child_process').exec;
 var Mustache = require('mustache');
 
-var minx = 457262.46; var miny = 96189.57;
-var maxx = 467601.05; var maxy = 106686.92;
+var ranges = [
+    {
+        name: "Ljubljana",
+        min: { x: 457262.46, y: 96189.57 },
+        max: { x: 467601.05, y: 106686.92 },
+    },
+    {
+        name: "Črnuče",
+        min: { x: 462558.80, y: 104325.61 },
+        max: { x: 467235.31, y: 108234.83 },
+    },
+    {
+        name: "Bled",
+        min: { x: 427984.52, y: 133178.09 },
+        max: { x: 433977.33, y: 138449.91 },
+    },
+    {
+        name: "Kranj",
+        min: { x: 447247.90, y: 118731.50 },
+        max: { x: 453928.63, y: 124922.75 },
+    },
+]
 
 var found = [];
 
+var statusReportDelay = 500;
+
+var queue = function(callback, length, noun, verbing, verbed) {
+    var q = async.queue(callback, length);
+    q.noun = noun;
+    q.verbing = verbing;
+    q.verbed = verbed;
+    return q;
+}.bind(this);
+
+var initRecordQueue = queue(initRecord, 10);
+var initResourceQueue = queue(initResource, 10);
+var processResourceQueue = queue(processResource, 10);
+var finishResourceQueue = queue(finishResource, 10);
+var downloadQueue = queue(
+    processResourceWithFunction.bind(null, downloadFile),
+    2, "download", "downloading", "downloaded"
+);
+var liberatorQueue = queue(
+    processResourceWithFunction.bind(null, liberateFile),
+    6, "liberation", "liberating", "liberated"
+);
+
+// http://gis.arso.gov.si/lidar/gkot/b_35/D96TM/TM_462_101.zlas
+// http://gis.arso.gov.si/lidar/otr/b_35/D96TM/TMR_462_101.zlas
+// http://gis.arso.gov.si/arcgis/rest/services/opensource_dof84/MapServer/export?bbox=462000%2C101000%2C463000.00%2C102000.00&bboxSR=3794&layers=&layerDefs=&size=1000%2C1000&imageSR=3794&format=png&transparent=false&dpi=&time=&layerTimeOptions=&dynamicLayers=&gdbVersion=&mapScale=&f=image
+
 var lidarRemote = "http://gis.arso.gov.si/";
 var lidarLocal = "W:/gis/arso/";
-
 var liberator = lidarLocal + "lasliberate/bin/lasliberate.exe";
 
-// var configGKOT = { type: "gkot", prefix: "TM_" };
-// var configOTR  = { type: "otr", prefix: "TMR_" };
-var configGKOT = {
-    remote: lidarRemote + "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas",
-    local:  lidarLocal  + "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas",
-    laz:    lidarLocal  + "laz/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.laz"
-}
-var configDOF84 = {
-    remote: lidarRemote +
-        "arcgis/rest/services/opensource_dof84/MapServer/" +
-        "export?bbox={{bounds.min.x}},{{bounds.min.y}},{{bounds.max.x}},{{bounds.max.y}}" + 
-        "&bboxSR=3794&layers=&layerDefs=" +
-        "&size={{image.width}},{{image.height}}" + 
-        "&imageSR=3794&format=png&transparent=false&dpi=&time=&layerTimeOptions=&dynamicLayers=&gdbVersion=&mapScale=&f=image",
-    local: lidarLocal + "dof84/{{record.BLOK}}/{{record.NAME}}.png"
-}
-var config = configDOF84;
+var configs = [
+    {
+        name: "lidar laz",
+        source: {
+            name: "lidar zlas",
+            source:
+                lidarRemote +
+                 "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas",
+            drain:
+                lidarLocal +
+                "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas"
+        },
+        drain:
+            lidarLocal +
+            "laz/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.laz",
+        queue: liberatorQueue
+    },
+    {
+        name: "map",
+        source:
+            lidarRemote +
+            "arcgis/rest/services/opensource_dof84/MapServer/export" +
+            "?bbox="+
+            "{{bounds.min.x}},{{bounds.min.y}}," +
+            "{{bounds.max.x}},{{bounds.max.y}}" + 
+            "&size={{image.width}},{{image.height}}" + 
+            "&bboxSR=3794&imageSR=3794" + 
+            "&format=png&f=image",
+        drain:
+            lidarLocal +
+            "dof84/{{record.BLOK}}/{{record.NAME}}.png"
+    }
+]
 
-var liberatorQueue = async.queue(liberatePair, 12);
+var existingDrains = [];
+var duplicated = 0;
+var total = 0;
 
 parseDatabase(lidarLocal + "fishnet/LIDAR_FISHNET_D96.dbf");
+
+
 
 function parseDatabase(file) {
     var parser = new Parser(file);
 
     parser.on('start', function(p) {
-        console.log('Parsing...');
+        console.log('db parsing');
     });
 
     parser.on('header', function(h) {
-        console.log("Parsed header");
+        console.log("db header parsed");
     });
 
     parser.on('record', function(record) {
-        if (record.CENTERX > minx && record.CENTERX < maxx &&
-            record.CENTERY > miny && record.CENTERY < maxy) {
-            found.push(record);
-        }
+        ranges.forEach(function(range) {
+            if (record.CENTERX > range.min.x && record.CENTERX < range.max.x &&
+                record.CENTERY > range.min.y && record.CENTERY < range.max.y) {
+                record.range = range;
+                initRecordQueue.push(record);
+            }
+        }, this);
     });
 
     parser.on('end', function(p) {
-        console.log('Done');
-        downloadNext();
+        console.log('db parsed');
     });
 
     parser.parse();
 }
-
-var index = 0;
 
 function fileExists(path) {
     var filestat = null;
@@ -75,17 +141,30 @@ function fileExists(path) {
     return !!(filestat && filestat.isFile());
 }
 
-// http://gis.arso.gov.si/lidar/gkot/b_35/D96TM/TM_462_101.zlas
-// http://gis.arso.gov.si/lidar/otr/b_35/D96TM/TMR_462_101.zlas
-// http://gis.arso.gov.si/arcgis/rest/services/opensource_dof84/MapServer/export?bbox=462000%2C101000%2C463000.00%2C102000.00&bboxSR=3794&layers=&layerDefs=&size=1000%2C1000&imageSR=3794&format=png&transparent=false&dpi=&time=&layerTimeOptions=&dynamicLayers=&gdbVersion=&mapScale=&f=image
-function downloadNext() {
-    // if (index > 0) return;
-    if (index >= found.length) return;
-    
-    var record = found[index];
-    index++;
-    
-    var params = {
+function plog(resource) {
+    console.log("  %s  %s  %s  %s",
+        resource.record.range.name,
+        resource.config.name,
+        resource.name,
+        Array.prototype.slice.call(arguments).slice(1).join("\t"));
+}
+
+function initRecord(record, done) {
+    configs.forEach(function(config) {
+        initResourceQueue.push({
+            record: record,
+            config: config
+        });
+    }, this);
+    done();
+}
+
+function initResource(resource, done) {
+
+    var record = resource.record;
+    var config = resource.config;
+
+    resource.params = {
         record: record,
         bounds: {
             "min": { "x": record.CENTERX - 500, "y": record.CENTERY - 500 },
@@ -96,69 +175,163 @@ function downloadNext() {
             height: 1000
         }
     }
-    
-    var local = Mustache.render(config.local, params);
-    var filename = path.basename(local);
-    
-    console.log("processing", filename);
-    
-    if (fileExists(local)) {
-        console.log("downloaded", filename);
-        
-        // Liberate zlas
-        if (local.substr(-5) == ".zlas" && config.laz) {
-            var laz = Mustache.render(config.laz, params);
-            liberate(local, laz, downloadNext);
-        } else {
-            setTimeout(downloadNext, 0);
-        }
-    } else {
-        mkdirp(path.dirname(local), function(err) {
-            if (err) throw new Error(err);
-            console.log("grabbing", filename);
-            var remote = Mustache.render(config.remote, params);
-            downloadFile(local, remote, downloadNext);
-        });
-    }
-}
 
-function liberate(local, laz, callback) {
-    mkdirp(path.dirname(laz), function(err) {
-        if (err) throw new Error("err");
-        liberatorQueue.push({ source: local, drain: laz});
-        callback();
-    })
-}
+    total++;
 
-function liberatePair(pair, callback) {
-    if (fileExists(pair.drain)) {
-        console.log("liberated to", pair.drain);
-        callback();
+    resource.drain = Mustache.render(config.drain, resource.params);
+    resource.name = path.basename(resource.drain);
+    if (existingDrains.indexOf(resource.drain) != -1) {
+        duplicated++;
         return;
     }
-    var cmd = liberator + " " + pair.source + " " + pair.drain;
-    console.log("liberating to", pair.drain);
-    exec(path.normalize(cmd), function(error, stdout, stderr) {
-        if (error) console.error(error);
-        callback();
+    existingDrains.push(resource.drain);
+
+    // plog(resource, "processing");
+
+    if (fileExists(resource.drain)) {
+        resource.source = "[unsourced]";
+        finishResourceQueue.push(resource);
+        done();
+    } else {
+        mkdirp(path.dirname(resource.drain), function(err) {
+            if (err) throw new Error(err);
+            
+            if (typeof config.source == "string") {
+                // URL to file
+                resource.source = Mustache.render(config.source, resource.params);
+                processResourceQueue.push(resource);
+            } else {
+                // Subconfig
+                initResourceQueue.push({
+                    record: resource.record,
+                    config: resource.config.source,
+                    parent: resource
+                });
+            }
+
+            done();
+            
+        });
+    }
+
+}
+
+function processResource(resource, done) {
+    
+    var config = resource.config;
+    var name = resource.name;
+
+    if (resource.source) {
+        if (!config.queue) config.queue = downloadQueue;
+        plog(resource, config.queue.noun + " required");
+        resource.startTime = Date.now();
+        config.queue.push(resource);
+    } else {
+        plog(resource, "unable to source");
+    }
+
+    done();
+}
+
+function finishResource(resource, done) {
+
+    var config = resource.config;
+    var name = resource.name;
+
+    if (Date.now() - resource.startTime > statusReportDelay) {
+        plog(resource, config.queue.verbed);
+    }
+    if (resource.parent) {
+        resource.parent.source = resource.drain;
+        processResourceQueue.push(resource.parent);
+    }
+    done();
+}
+
+function processResourceWithFunction(func, resource, done) {
+    plog(resource, resource.config.queue.verbing);
+    func(resource.source, resource.drain, function onFinish(err) {
+        if (err) {
+            plog(resource, resource.config.queue.noun + " error: " + error);
+        } else {
+            finishResourceQueue.push(resource);
+        }
+        done();
     });
 }
 
-function downloadFile(local, remote, callback) {
-    // console.log("downloading", remote, "to", local);
+function downloadFile(remote, local, done) {
     var localTemp = local + ".part";
     var file = fs.createWriteStream(localTemp);
     var request = http.get(remote, function(response) {
-        response.pipe(file);
         file.on('finish', function() {
             file.close(function closed() {
                 fs.rename(localTemp, local, function renamed(err) {
-                    callback();
+                    if (done) done();
                 });
             });
         });
+        response.pipe(file);
     }).on('error', function(err) {
-        fs.unlink(dest);
-        if (callback) callback(err.message);
+        fs.unlink(localTemp);
+        if (done) done(err.message);
     });
 }
+
+function liberateFile(zlas, drain, done) {
+    var indexExt = ".lax";
+    
+    var ext = path.extname(drain);
+    var dir = path.dirname(drain);
+    var base = path.basename(drain, ext);
+    
+    var index = path.join(dir, base + indexExt);
+    
+    var prefix = base + ".part";
+    var drainTemp = path.join(dir, prefix + ext);
+    var indexTemp = path.join(dir, prefix + indexExt);
+    
+    var cmd = liberator + " " + zlas + " " + drainTemp;
+    exec(path.normalize(cmd), function(error, stdout, stderr) {
+        if (error) {
+            fs.unlink(drainTemp);
+            if (done) done();
+        } else {
+            async.parallel([
+                function renameIndex(callback) {
+                    fs.rename(indexTemp, index, function renamedIndex(err) { callback(); });  
+                },
+                function renameDrain(callback) {
+                    fs.rename(drainTemp, drain, function renamedDrain(err) { callback(); });
+                }
+            ], done);
+        }
+    });
+}
+
+/*
+function downloadResource(resource, done) {
+    plog(resource, resource.config.queue.verbing);
+    var name = resource.name;
+    downloadFile(resource.source, resource.drain, function onFinish(err) {
+        if (err) {
+            plog(resource, "download error: " + err);
+        } else {
+            finishResourceQueue.push(resource);
+        }
+        done();
+    });
+}
+
+function liberateResource(resource, done) {
+    plog(resource, resource.config.queue.verbing);
+    liberateFile(resource.source, resource.drain, function onFinish(err) {
+        if (err) {
+            plog(resource, "liberation error: " + error);
+        } else {
+            finishResourceQueue.push(resource);
+        }
+        done();
+    });
+}
+*/

@@ -1,12 +1,18 @@
 {
-  "name": "gis-arso",
+  "name": "arso-grab-lidar",
   "version": "1.0.0",
-  "description": "",
+  "description": "Grabs LIDAR and ortophoto images from ARSO",
   "main": "grab-lidar.js",
   "dependencies": {
-    "node-dbf": "^0.1.0"
+    "async": "^2.0.0-rc.6",
+    "mkdirp": "^0.5.1",
+    "mustache": "^2.2.1",
+    "node-dbf": "^0.1.3"
   },
   "devDependencies": {},
-  "author": "",
-  "license": "ISC"
+  "author": "Miha Lunar",
+  "license": "ISC",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
 }

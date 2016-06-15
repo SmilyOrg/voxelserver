@@ -6,11 +6,9 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/src/vendor/libamf/CMakeModules/")
 
-#add_definitions(
-#	-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_OMP
-#	-DUSE_WEBSOCKET
-#	-D_CRT_NO_TIME_T
-#)
+add_definitions(
+  -DUNORDERED
+)
 
 set(includes
 	include/
