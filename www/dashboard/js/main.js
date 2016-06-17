@@ -1,25 +1,33 @@
 var d3stats;
-var d3execTimeLabels;
+var d3execTimeList;
 var d3execTimeBars;
 var execTimeSeries = {};
 var execTimeSeriesCount = 0;
 var colors;
 var barChart;
+var excluded = [];
 
 var STAT = 0;
 var EXEC_TIME = 1;
+
 
 function formatMicro(v) {
     return (v*1e-3).toFixed(2) + "ms";
 }
 
-function updateCharts(data) {
+function updateCharts(raw) {
     
-    data = data.filter(function(counter) { return counter.type == EXEC_TIME; });
+    dataTime = raw.filter(function(counter) {
+        return counter.type == EXEC_TIME;
+    });
+
+    dataTimeExcl = dataTime.filter(function(counter) {
+        return excluded.indexOf(counter.name) == -1; 
+    })
     
     var time = new Date().getTime();
     var stacked = 0;
-    data.forEach(function(counter) {
+    dataTimeExcl.forEach(function(counter) {
         var ts = execTimeSeries[counter.id];
         if (!ts) {
             series = new TimeSeries();
@@ -33,27 +41,64 @@ function updateCharts(data) {
     }, this);
     
     d3execTimeBars
-        .datum([{ values: data }])
+        .datum([{ values: dataTimeExcl }])
         .call(barChart)
     
     
-    var labels = d3execTimeLabels
-        .selectAll(".label")
-        .data(data)
+    var list = d3execTimeList
+        .selectAll(".item")
+        .data(dataTime)
         
-    var label = labels
+    var item = list
         .enter()
         .append("div")
-        .attr("class", "ui inverted label")
-        
+        .attr("class", "ui checkbox item")
+    
+    /*
     label.append("span")
         .attr("class", "name")
     
     label.append("div")
         .attr("class", "detail")
+    */
+
+    item.append("input")
+        .attr("type", "checkbox")
+        .each(function(counter) {
+            if (excluded.indexOf(counter.name) == -1) d3.select(this).attr("checked", "checked");
+        })
+
+    var label = item.append("label")
+        .attr("class", "")
+        .append("div")
+        .attr("class", "ui inverted label")
+
+    label.append("span")
+        .attr("class", "name")
     
-    labels.exit().remove()
+    label.append("div")
+        .attr("class", "detail")
+
+    list.exit().remove()
     
+    $(item[0].filter(function(obj) { return obj != null; }))
+        .checkbox({
+            onChange: function() {
+                var check = $(this).parent();
+                var checked = check.checkbox("is checked");
+                var name = check.find(".name").text();
+                var index = excluded.indexOf(name);
+                if (checked) {
+                    if (index != -1) excluded.splice(index, 1);
+                } else {
+                    if (index == -1) excluded.push(name);
+                }
+            }
+        })
+    ;
+
+    var labels = list.select(".label")
+
     labels
         .style("background-color", function(counter) { return colors(execTimeSeries[counter.id].index) })
     
@@ -136,7 +181,7 @@ $(document).ready(function() {
     }, 1000);
     
     d3stats = d3.select("#stats")
-    d3execTimeLabels = d3.select("#execTimeLabels")
+    d3execTimeList = d3.select("#execTimeList")
     d3execTimeBars = d3.select('#execTimeBars svg')
     
     chart = new SmoothieChart( {

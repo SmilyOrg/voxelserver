@@ -238,6 +238,9 @@ static const std::list<std::pair<unsigned int, Classification>> classificationMa
     { 0xc39583, Classification::BUILDING_ROOF_TILED_ORANGE },
     { 0xc1937f, Classification::BUILDING_ROOF_TILED_ORANGE },
     { 0xae7264, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0xb68978, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0xd0a794, Classification::BUILDING_ROOF_TILED_ORANGE },
+    { 0xbda89d, Classification::BUILDING_ROOF_TILED_ORANGE },
     { 0x5f666b, Classification::BUILDING_ROOF_TILED_GRAY },
     { 0x858889, Classification::BUILDING_ROOF_TILED_GRAY },
     { 0x787170, Classification::BUILDING_ROOF_TILED_GRAY },
@@ -256,6 +259,7 @@ static const std::list<std::pair<unsigned int, Classification>> classificationMa
     { 0xd0cacb, Classification::GROUND_CONCRETE }, 
     { 0xbfbbba, Classification::GROUND_CONCRETE },
     // Shadows
+    //*
     { 0x040814, Classification::VEGETATION_HIGH }, // Trees
     { 0x273649, Classification::GROUND_CONCRETE }, // Concrete
     { 0x253748, Classification::GROUND_CONCRETE }, // Concrete
@@ -265,7 +269,18 @@ static const std::list<std::pair<unsigned int, Classification>> classificationMa
     { 0x060b25, Classification::WATER }, // Water
     { 0x0e2231, Classification::WATER }, // Water
     { 0x132e38, Classification::WATER }, // Water
-    
+    //*/
+    /*
+    { 0x040814, Classification::SHADOW }, // Trees
+    { 0x273649, Classification::SHADOW }, // Concrete
+    { 0x253748, Classification::SHADOW }, // Concrete
+    { 0x38414e, Classification::SHADOW }, // Asphalt
+    { 0x1b2b3e, Classification::SHADOW }, // Asphalt
+    { 0x0f1e30, Classification::SHADOW }, // Grass
+    { 0x060b25, Classification::SHADOW }, // Water
+    { 0x0e2231, Classification::SHADOW }, // Water
+    { 0x132e38, Classification::SHADOW }, // Water
+    */
     //{ 0x, Classification::SHADOW }, // 
 };
 
@@ -300,7 +315,6 @@ static const std::map<Classification, int> classificationFlags = {
 static const std::map<Classification, std::list<Classification>> classificationSpec = {
 
     { Classification::GROUND, {
-        Classification::SHADOW,
         Classification::WATER,
         Classification::VEGETATION_LOW,
         Classification::GROUND_ASPHALT,
@@ -308,7 +322,6 @@ static const std::map<Classification, std::list<Classification>> classificationS
     } },
 
     { Classification::VEGETATION_LOW, {
-        Classification::SHADOW,
         Classification::WATER,
         Classification::VEGETATION_LOW,
         Classification::GROUND_ASPHALT,
@@ -552,8 +565,8 @@ class Timer {
 
     clock::time_point start;
     const char *name;
-    bool printed = false;
-    bool counted = false;
+    bool printed;
+    bool counted;
     RuntimeCounter *counter;
 
 public:
@@ -579,6 +592,7 @@ public:
 
     void tick()
     {
+        printed = counted = false;
         start = clock::now();
     }
     ns tock() const
@@ -691,9 +705,15 @@ bool getParamBool(const char *queryString, size_t queryLength, const char *name)
 #if 1
 #define debug(format, ...) plog(format, __VA_ARGS__)
 #define dtimer(name) Timer timer(name)
+#define dtimerInit(var_id, name) Timer timer_ ## var_id {name}
+#define dtimerStart(var_id) timer_ ## var_id ## .tick()
+#define dtimerStop(var_id) timer_ ## var_id ## .count()
 #else
 #define debug(format, ...) 
-#define dtimer(name)  
+#define dtimer(name)
+#define dtimerInit(name)
+#define dtimerStart(name)
+#define dtimerStop(name)
 #endif
 
 void printArray(struct mg_connection *conn, unsigned char *data, size_t size, size_t cols = 32)
@@ -1391,7 +1411,7 @@ public:
         }
     }
 
-    static Classification classifyPixel(ClassificationQuery &cq, unsigned int rgb) {
+    static Classification classifyPixel(const ClassificationQuery &cq, unsigned int rgb) {
         int tr, tg, tb;
 
         rgbToComponents(rgb, tr, tg, tb);
@@ -1403,13 +1423,18 @@ public:
         auto classSpec = classificationSpec.find(cq.lidar);
         if (classSpec != classificationSpec.end()) specializesTo = &classSpec->second;
 
+        //long distances[Classification::END] = {};
+        //int counts[Classification::END] = {};
+
         for (auto &iter : classificationMap) {
             // Skip unspecialized points
             if (specializesTo && std::find(specializesTo->begin(), specializesTo->end(), iter.second) == specializesTo->end()) continue;
 
+            /*
             int iterFlags = 0;
             auto foundFlags = classificationFlags.find(iter.second);
             if (foundFlags != classificationFlags.end()) iterFlags = foundFlags->second;
+            */
             // Is this right?
             //if (iterFlags & !cq.flags) continue;
 
@@ -1422,12 +1447,29 @@ public:
             int db = mb - tb;
 
             long dist = dr*dr + dg*dg + db*db;
-
+            /*
+            distances[iter.second] += dist;
+            counts[iter.second]++;
+            //*/
+            //*
             if (dist < minDist) {
                 minDist = dist;
                 minClassification = iter.second;
             }
+            //*/
         }
+
+        /*
+        for (int i = 0; i < Classification::END; i++) {
+            int count = counts[i];
+            if (count == 0) continue;
+            long dist = distances[i] / count;
+            if (dist < minDist) {
+                minDist = dist;
+                minClassification = static_cast<Classification>(i);
+            }
+        }
+        */
 
         return minClassification;
     }
@@ -1472,12 +1514,12 @@ public:
 		return (md[mapIndex + 0] << 16) | (md[mapIndex + 1] << 8) | md[mapIndex + 2];
 	}
 
-    Classification getMapPointClassification(ClassificationQuery &cq, int mx, int my) {
+    Classification getMapPointClassification(const ClassificationQuery &cq, int mx, int my) {
 		unsigned int pixel = getMapPointColor(mx, my);
         return classifyPixel(cq, pixel);
     }
 
-    static Classification getSpecializedClassification(ClassificationQuery &cq, MapCloud** cloudOut = nullptr, int* mapX = nullptr, int* mapY = nullptr) {
+    static Classification getSpecializedClassification(const ClassificationQuery &cq, MapCloud** cloudOut = nullptr, int* mapX = nullptr, int* mapY = nullptr) {
 
 		vassert(!isnan(cq.x) && !isnan(cq.y), "Classification query invalid coordinates");
 		vassert(cq.corners != nullptr, "Classification query corners missing");
@@ -1636,8 +1678,7 @@ MapCloud* getMapCloud(int lat, int lon)
 
     // Not found, create a new one
 
-    plog("");
-    plog("Processing new map cloud at %d, %d", lat, lon);
+    //plog("Initializing new map cloud at %d, %d", lat, lon);
 
     char allPath[1024],
          dof84Path[1024];
@@ -1658,7 +1699,7 @@ MapCloud* getMapCloud(int lat, int lon)
     //if (mc.all) delete mc.all;
     //if (mc.ground) delete mc.ground;
 
-    plogScope();
+    //plogScope();
 
     //mc.all    = new PointSearch<num_t>(allPath, treeAllPath, 50);
     //mc.ground = new PointSearch<num_t>(groundPath, treeGroundPath, 20);
@@ -1709,7 +1750,7 @@ MapCloud* getMapCloud(int lat, int lon)
     //printf("  Building KDTree for %d ground points\n", mc.ground->cloud.pts.size());
     //mc.ground->buildTree();
 
-    plog("Done");
+    //plog("Done");
     return mc;
 }
 
@@ -2193,28 +2234,46 @@ static void renderMapClouds(MapImage &img)
     encodeImage(&img, pixels.get(), pixelWidth, pixelHeight);
 }
 
-static inline void getBlockFromCoords(pcln *reference, Point &p, int &bx, int &by, int &bz)
+static void getBlockFromCoords(Vec reference, Vec coords, int &bx, int &by, int &bz)
 {
-	bx = static_cast<int>(p.x - reference[0]);
-	by = static_cast<int>(p.z - reference[2]);
-	bz = static_cast<int>(reference[1] - p.y);
+    /*
+	bx = static_cast<int>(p.x - reference.x());
+	by = static_cast<int>(p.z - reference.z());
+	bz = static_cast<int>(reference.y() - p.y);
+    */
+    Vec diff = coords - reference;
+    bx = diff.x();
+    by = diff.z();
+    bz = -diff.y();
 }
 
-static inline void getCoordsFromBlock(pcln *reference, int bx, int by, int bz, Point &p)
+static void getBlockFromCoords(Vec reference, Point p, int &bx, int &by, int &bz)
 {
-	p.x = bx + reference[0];
-	p.y = reference[1] - bz;
-	p.z = by + reference[2];
+    Vec coords;
+    coords << p.x, p.y, p.z;
+    getBlockFromCoords(reference, coords, bx, by, bz);
 }
 
-static inline void getCoordsFromBlock(pcln *origin, int bx, int by, int bz, Vec &v)
+static void getCoordsFromBlock(Vec reference, int bx, int by, int bz, Vec &coords)
 {
-    Point p;
-    getCoordsFromBlock(origin, bx, by, bz, p);
-    v << p.x, p.y, p.z;
+    //p.x = bx + reference[0];
+    //p.y = reference[1] - bz;
+    //p.z = by + reference[2];
+    coords << bx, bz, by;
+    coords(1) = -coords(1);
+    coords += reference;
 }
 
-static inline void extendColumn(int bx, int by, int bz, int sx, unsigned int* columns, int* minHeight = nullptr, int* maxHeight = nullptr)
+static void getCoordsFromBlock(Vec reference, int bx, int by, int bz, Point &p)
+{
+    Vec coords;
+    getCoordsFromBlock(reference, bx, by, bz, coords);
+    p.x = coords.x();
+    p.y = coords.y();
+    p.z = coords.z();
+}
+
+static void extendColumn(int bx, int by, int bz, int sx, unsigned int* columns, int* minHeight = nullptr, int* maxHeight = nullptr)
 {
 	if (maxHeight && by > *maxHeight) *maxHeight = by;
 	if (minHeight && by < *minHeight) *minHeight = by;
@@ -2223,14 +2282,14 @@ static inline void extendColumn(int bx, int by, int bz, int sx, unsigned int* co
 	if (by > col) columns[colindex] = by;
 }
 
-static inline void applyBlockToCloud(pcln *origin, int bx, int by, int bz, Classification c, PointCloud *cloud) {
+static void applyBlockToCloud(Vec origin, int bx, int by, int bz, Classification c, PointCloud *cloud) {
     Vec query_block_center;
     getCoordsFromBlock(origin, bx, by, bz, query_block_center);
 
     Vec block_center; block_center << 0.5, 0.5, 0.5;
     query_block_center += block_center;
 
-    const pcln radius = M_SQRT1_2;
+    const pcln radius = M_SQRT2;
     std::vector<std::pair<size_t, pcln> > indices;
     RadiusResultSet<pcln, size_t> points(radius*radius, indices);
     cloud->findRadius(query_block_center.data(), points);
@@ -2242,7 +2301,7 @@ static inline void applyBlockToCloud(pcln *origin, int bx, int by, int bz, Class
     }
 }
 
-static inline Classification getBlockFromCloud(pcln *origin, int bx, int by, int bz, PointCloud *cloud) {
+static Classification getBlockFromCloud(Vec origin, int bx, int by, int bz, PointCloud *cloud) {
     Vec query_block_center;
     getCoordsFromBlock(origin, bx, by, bz, query_block_center);
 
@@ -2362,16 +2421,9 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 	std::vector<unsigned int> &groundCols = br.groundCols;
     */
 
-    std::vector<unsigned int> blocks;
-    std::vector<unsigned int> columns;
-    std::vector<unsigned int> groundCols;
-    blocks.resize(sxyz);
-    columns.resize(sxz);
-    groundCols.resize(sxz);
-
-	memset(blocks.data(), 0, blocks.size() * sizeof(blocks[0]));
-	memset(columns.data(), 0, columns.size() * sizeof(columns[0]));
-	memset(groundCols.data(), 0, groundCols.size() * sizeof(groundCols[0]));
+    std::vector<unsigned int> blocks(sxyz, 0);
+    std::vector<unsigned int> columns(sxz, 0);
+    std::vector<unsigned int> groundCols(sxz, 0);
 
 	//std::vector<unsigned int> blocks(sxyz);
 	//std::vector<unsigned int> columns(sxz);
@@ -2401,8 +2453,8 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
     Vec bounds_max;
 
 	// Get bounds
-	getCoordsFromBlock(origin.data(), x, y, z, bounds_tl);
-	getCoordsFromBlock(origin.data(), x + sx, y + sy, z + sz, bounds_br);
+	getCoordsFromBlock(origin, x, y, z, bounds_tl);
+	getCoordsFromBlock(origin, x + sx, y + sy, z + sz, bounds_br);
 
 	bounds_min = bounds_tl.cwiseMin(bounds_br);
 	bounds_max = bounds_tl.cwiseMax(bounds_br);
@@ -2476,7 +2528,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 			Point &p = all.getPoint(i);
 
             int bx, by, bz;
-			getBlockFromCoords(bounds_tl.data(), p, bx, by, bz);
+			getBlockFromCoords(bounds_tl, p, bx, by, bz);
 
             /*
 			if (by < 0 || by > sy) continue;
@@ -2518,21 +2570,8 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
 	num = count;
 
-	//              //
-	// Spatial tree //
-	//              //
-	{
-		dtimer("kdtree all");
-		all.build();
-	}
-	{
-		dtimer("kdtree ground");
-		ground.build();
-	}
 
-
-
-
+    /*
     for (size_t i = 0; i < all.getPointNum(); i++) {
         Point &p = all.getPoint(i);
 
@@ -2548,6 +2587,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
         //br.exportWrite(p.x - bounds_min.x(), p.y - bounds_min.y(), p.z - bounds_min.z(), -101);
         //br.jsonWrite(p.x - bounds_tl.x(), p.z - bounds_tl.z(), p.y - bounds_tl.y(), -101);
     }
+    */
 
 	unsigned int *cblocks = blocks.data();
 	
@@ -2606,7 +2646,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
                     int bz = (i >> psx) & msz;
                     int by = (i >> psx) >> psz;
 
-                    Classification c = getBlockFromCloud(bounds_tl.data(), bx, by, bz, &all);
+                    Classification c = getBlockFromCloud(bounds_tl, bx, by, bz, &all);
                     if (c != Classification::END) cv = c;
                 }
 
@@ -2614,7 +2654,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
             }
         }
         //*/
-        
+
         //*
         {
             //                    //
@@ -2642,85 +2682,38 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
             // Building fill //
             //               //
             dtimer("building fill");
-            Vec block_center; block_center << 0.5, 0.5, 0.5;
+            //dtimerInit(slanted_roof_search, "slanted roof search");
+
             for (int i = 0; i < sxyz; i++) {
                 unsigned int &cv = cblocks[i];
-                int c = cv & 0xFF;
-                switch (c) {
-                case Classification::BUILDING:
+                if (cv == Classification::BUILDING) {
 
                     int bx, by, bz;
 
                     getIndexBlock(i, bx, by, bz, sx, sz);
 
                     //if (by > 130) c = Classification::WATER;
-                    //*
                     int index = i - sxz;
                     int iy = by - 1;
                     while (iy > minHeight) {
-                        assert(index > 0);
                         cblocks[index] = Classification::BUILDING;
-                        //br.jsonWrite(bx + 0.5, iy + 0.5, bz + 0.5, -11);
                         index -= sxz;
                         iy--;
                     }
-                    
-                    //Point cq_point;
-					//getCoordsFromBlock(bounds_tl.data(), bx, by, bz, cq_point);
-					
-					//ClassificationQuery cq;
-                    //cq.x = cq_point.x;
-					//cq.y = cq_point.y;
-					//cq.corners = br.cornerClouds;
-                    //cq.lidar = Classification::BUILDING;
-                    //cq.flags = ClassificationFlags::DEFAULT;
-                    //Classification sc = MapCloud::getSpecializedClassification(cq);
-                    //if (sc > 0) cv = sc;
 
-                    {
-                        dtimer("slanted roof search");
-                        // Slanted roof search
-                        Vec query_block_center;
-                        getCoordsFromBlock(bounds_tl.data(), bx, by, bz, query_block_center);
-                        query_block_center += block_center;
-
-                        const pcln radius = 2;
-                        std::vector<std::pair<size_t, pcln> > indices;
-                        RadiusResultSet<pcln, size_t> points(radius*radius, indices);
-                        all.findRadius(query_block_center.data(), points);
-
-                        double slantAngle = 45;
-                        double acceptedAngleDelta = 30;
-                        double dotThreshold = 0.30;
-
-                        size_t buildingPoints = 0;
-                        size_t slantedPoints = 0;
-                        double avgAngle = 0;
-                        double avgDot = 0;
-                        for (size_t in = 0; in < points.size(); in++) {
-                            std::pair<size_t, pcln> pair = points.m_indices_dists[in];
-                            Point &p = all.getPoint(pair.first);
-                            if (p.classification != Classification::BUILDING) continue;
-                            buildingPoints++;
-                            Vec buildingPoint(p.x, p.y, p.z);
-                            Vec deltaVector = buildingPoint - query_block_center;
-                            deltaVector.normalize();
-                            double dot = deltaVector.dot(Eigen::Vector3d::UnitZ());
-                            avgDot += abs(dot);
-                            /*
-                            double angle = acos(dot) * 180 / M_PI;
-                            avgAngle += abs(angle);
-                            if (abs(angle - slantAngle) < acceptedAngleDelta) slantedPoints++;
-                            */
-                        }
-                        avgAngle /= buildingPoints;
-                        avgDot /= buildingPoints;
-                        if (avgDot > dotThreshold) cv = Classification::BUILDING_ROOF_TILED_ORANGE;
-                    }
+                    extendColumn(bx, minHeight, bz, sx, groundCols.data());
                 }
             }
         }
-        //*/
+
+        {
+            //                       //
+            // Spatial tree (ground) //
+            //                       //
+            dtimer("kdtree ground");
+            ground.build();
+        }
+
 
         //*
         {
@@ -2728,6 +2721,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
             // Ground fill //
             //             //
             dtimer("ground fill");
+            dtimerInit(ground_search, "ground search");
 
             Vec block_center; block_center << 0.5, 0.5, 0.5;
 
@@ -2741,35 +2735,41 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
                     int bx = ix, bz = iz;
                     int by = 0;
                     bool found = false;
-                    
-                    {
-                        dtimer("ground search");
 
-                        const int num_iters = 4;
+                    {
+                        dtimerStart(ground_search);
+
+                        const double min_diff = 0.5;
+
+                        const int max_iters = 10;
                         Vec query_block_center;
                         size_t ret_index;
                         pcln out_dist_sqr;
+                        pcln diff = min_diff + 1;
                         Point *point;
-                        getCoordsFromBlock(bounds_tl.data(), bx, by, bz, query_block_center);
+                        getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
                         query_block_center += block_center;
 
-                        int i;
-                        for (i = 0; i < num_iters; i++) {
+                        int i = 0;
+                        //for (i = 0; i < num_iters; i++) {
+                        for (i = 0; i < max_iters && diff > min_diff; i++) {
                             found = ground.findNearest(query_block_center.data(), ret_index, out_dist_sqr);
 
                             if (!found) break;
 
                             point = &ground.getPoint(ret_index);
+                            diff = abs(query_block_center.z() - point->z);
                             query_block_center.z() = point->z;
 
-                            //br.jsonWrite(query_block_center.x() - bounds_tl.x(), query_block_center.z() - bounds_tl.z(), query_block_center.y() - bounds_tl.y(), -50 - i);
+                            //br.exportWrite(query_block_center.x() - bounds_tl.x(), query_block_center.z() - bounds_tl.z(), query_block_center.y() - bounds_tl.y(), -50 - i);
+                            br.exportWrite(query_block_center.x() - bounds_tl.x(), i * 5, query_block_center.y() - bounds_tl.y(), -100 - i);
                         }
 
                         if (i > 0) {
-                            getBlockFromCoords(bounds_tl.data(), *point, bx, by, bz);
+                            getBlockFromCoords(bounds_tl, *point, bx, by, bz);
                             bx = ix;
                             bz = iz;
-                            //br.jsonWrite(bx + 0.5, by + 0.5, bz + 0.5, -50);
+                            //br.exportWrite(bx + 0.5, by + 0.5, bz + 0.5, -50);
                             found = true;
                         }
 
@@ -2780,12 +2780,14 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
                             p.z = point->z;
                             all.addPoint(p);
                         }
+
+                        dtimerStop(ground_search);
                     }
 
                     by = by >= 0 ? by < sy ? by : sy - 1 : 0;
 
                     if (by < 0) by = 0;
-                    if (by >= sy) by = sy-1;
+                    if (by >= sy) by = sy - 1;
 
                     //br.jsonWrite(bx + 0.5, by + 0.5, bz + 0.5, -13);
 
@@ -2811,13 +2813,108 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
                 }
             }
 
+        }
+        //*/
+
+        {
+            //                    //
+            // Spatial tree (all) //
+            //                    //
+            dtimer("kdtree all");
+            all.build();
+        }
+
+        /*
+        {
+            //                     //
+            // Slanted roof search //
+            //                     //
+            dtimer("slanted roof search");
+            for (int iz = 0; iz < sz; iz++) {
+                for (int ix = 0; ix < sx; ix++) {
+                    int bx = ix;
+                    int bz = iz;
+                    int colindex = getColumnIndex(bx, bz, sx);
+                    int by = columns[colindex];
+                    int index = getBlockIndex(bx, by, bz, sx, sxz);
+                    unsigned int &cv = cblocks[index];
+
+                    if (cv == Classification::BUILDING)
+                    ///
+                    {
+                        //dtimerStart(slanted_roof_search);
+                        // Slanted roof search
+                        Vec query_block_center;
+                        getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
+
+                        query_block_center += Vec::Constant(0.5);
+
+                        const pcln radius = 2;
+                        std::vector<std::pair<size_t, pcln> > indices;
+                        RadiusResultSet<pcln, size_t> points(radius*radius, indices);
 
 
-            {
-                dtimer("kdtree rebuild");
-                all.build();
+                        all.findRadius(query_block_center.data(), points);
+
+                        double slantAngle = 45;
+                        //double acceptedAngleDelta = 15;
+                        double dotThreshold = 0.40;
+
+                        size_t buildingPoints = 0;
+                        size_t slantedPoints = 0;
+                        //double avgAngle = 0;
+                        double avgDot = 0;
+                        for (size_t in = 0; in < points.size(); in++) {
+                            std::pair<size_t, pcln> pair = points.m_indices_dists[in];
+                            Point &p = all.getPoint(pair.first);
+                            if (p.classification != Classification::BUILDING) continue;
+                            buildingPoints++;
+                            Vec buildingPoint(p.x, p.y, p.z);
+                            Vec deltaVector = buildingPoint - query_block_center;
+                            deltaVector.normalize();
+                            double dot = deltaVector.dot(Eigen::Vector3d::UnitZ());
+                            avgDot += abs(dot);
+                            //double angle = acos(dot) * 180 / M_PI;
+                            //avgAngle += abs(angle);
+                            //if (abs(angle - slantAngle) < acceptedAngleDelta) slantedPoints++;
+                        }
+                        //avgAngle /= buildingPoints;
+                        avgDot /= buildingPoints;
+                        if (avgDot > dotThreshold) cv = Classification::BUILDING_ROOF_TILED_ORANGE;
+
+                        //dtimerStop(slanted_roof_search);
+                    }
+                    ///
+                }
             }
         }
+            //*/
+
+            
+        /*
+        std::vector<unsigned int> buildCols(sxz, 0);
+
+        for (int iz = 0; iz < sz; iz++) {
+            for (int ix = 0; ix < sx; ix++) {
+                int bx = ix;
+                int bz = iz;
+                int colindex = getColumnIndex(bx, bz, sx);
+                int by = columns[colindex];
+                int index = getBlockIndex(bx, by, bz, sx, sxz);
+                unsigned int &cv = cblocks[index];
+                if (cv == Classification::BUILDING) extendColumn(bx, by, bz, sx, buildCols.data());
+            }
+        }
+
+        for (int i = 0; i < sxyz; i++) {
+            unsigned int &cv = cblocks[i];
+            int bx, by, bz;
+            getIndexBlock(i, bx, by, bz, sx, sz);
+            int colindex = getColumnIndex(bx, bz, sx);
+            if (by > minHeight && by < buildCols[colindex]) cv = Classification::BUILDING;
+        }
+        */
+
         //*/
 
 
@@ -2840,7 +2937,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
 					ClassificationQuery cq;
 					Point cq_point;
-					getCoordsFromBlock(bounds_tl.data(), bx, by, bz, cq_point);
+					getCoordsFromBlock(bounds_tl, bx, by, bz, cq_point);
 					cq.x = cq_point.x;
 					cq.y = cq_point.y;
 					cq.corners = cornerClouds;
@@ -2857,8 +2954,8 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
 
                     // Apply specialization to point cloud
-                    applyBlockToCloud(bounds_tl.data(), bx, by, bz, (Classification)cv, &all);
-                    applyBlockToCloud(bounds_tl.data(), bx, by, bz, (Classification)cv, &ground);
+                    applyBlockToCloud(bounds_tl, bx, by, bz, (Classification)cv, &all);
+                    applyBlockToCloud(bounds_tl, bx, by, bz, (Classification)cv, &ground);
 
 				}
 			}
@@ -2892,7 +2989,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
                         if (std::find(filter.sources.begin(), filter.sources.end(), c) == filter.sources.end()) continue;
 
-                        getCoordsFromBlock(bounds_tl.data(), bx, by, bz, query_block_center);
+                        getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
                         query_block_center += block_center;
 
                         //br.jsonWrite(query_block_center.x() - bounds_min.x(), query_block_center.y() - bounds_min.y(), query_block_center.z() - bounds_min.z(), -3);
@@ -2961,7 +3058,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
                             //br.jsonWrite(query_block_center.x() - bounds_min.x(), query_block_center.y() - bounds_min.y(), query_block_center.z() + 40 - bounds_min.z(), -5);
                         }
 
-                        if (changed) applyBlockToCloud(bounds_tl.data(), bx, by, bz, (Classification)cv, &all);
+                        if (changed) applyBlockToCloud(bounds_tl, bx, by, bz, (Classification)cv, &all);
 
                     }
 
@@ -3040,7 +3137,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
                         int step = by < surfy ? 1 : -1;
                         for (int iy = by; iy != surfy; iy += step) {
                             cblocks[getBlockIndex(bx, iy, bz, sx, sxz)] = Classification::NONE;
-                            //applyBlockToCloud(bounds_tl.data(), ax, iy, az, Classification::NONE, &all);
+                            //applyBlockToCloud(bounds_tl, ax, iy, az, Classification::NONE, &all);
                         }
                         cblocks[getBlockIndex(bx, surfy, bz, sx, sxz)] = Classification::WATER;
 
@@ -3119,6 +3216,34 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
         //*/
 
 
+
+
+        {
+            //                                          //
+            // Classification + custom blocks -> blocks //
+            //                                          //
+            dtimer("transform");
+
+            // TODO: only use uint8 for cblocks, but then convert into the uint32
+            // shape used below
+            for (int i = 0; i < sxyz; i++) {
+                unsigned int &cv = cblocks[i];
+
+                int bx = i & msx;
+                int bz = (i >> psx) & msz;
+                int by = (i >> psx) >> psz;
+
+                if (cv && !debug) cv = classificationToBlock(cv);
+
+                if (cv > 0) {
+                    //br.jsonWrite(bx + 0.5, by + 0.5, bz + 0.5, -10);
+                    extendColumn(bx, by, bz, sx, columns.data(), &minHeight, &maxHeight);
+                }
+
+                //c |= (i%0xF) << 16;
+            }
+        }
+
         /*
         {
             //                             //
@@ -3142,7 +3267,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
                     if (c != Classification::WATER) continue;
 
-                    getCoordsFromBlock(bounds_tl.data(), bx, by, bz, query_block_center);
+                    getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
                     query_block_center += block_center;
 
                     const pcln radius = 10;
@@ -3205,7 +3330,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
 					Point p;
 					int mx, my;
-					getCoordsFromBlock(bounds_tl.data(), bx, by, bz, p);
+					getCoordsFromBlock(bounds_tl, bx, by, bz, p);
 					MapCloud* mapCloud = MapCloud::fromCorners(br.cornerClouds, p.x, p.y, &mx, &my);
 
 					switch (c)
@@ -3272,7 +3397,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 
 
         Vec query_block_center;
-        getCoordsFromBlock(bounds_tl.data(), bx, by, bz, query_block_center);
+        getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
         Vec block_center; block_center << 0.5, 0.5, 0.5; query_block_center += block_center;
 
         const pcln depthRadius = 20;
@@ -3418,34 +3543,6 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 		}
 		//*/
 
-
-
-
-        {
-            //                                          //
-            // Classification + custom blocks -> blocks //
-            //                                          //
-            dtimer("transform");
-
-            // TODO: only use uint8 for cblocks, but then convert into the uint32
-            // shape used below
-            for (int i = 0; i < sxyz; i++) {
-                unsigned int &cv = cblocks[i];
-
-                int bx = i & msx;
-                int bz = (i >> psx) & msz;
-                int by = (i >> psx) >> psz;
-
-                if (cv && !debug) cv = classificationToBlock(cv);
-
-                if (cv > 0) {
-                    //br.jsonWrite(bx + 0.5, by + 0.5, bz + 0.5, -10);
-					extendColumn(bx, by, bz, sx, columns.data(), &minHeight, &maxHeight);
-                }
-
-                //c |= (i%0xF) << 16;
-            }
-        }
     }
 
     //br.jsonClose();
@@ -3684,7 +3781,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
     */
 
 
-    Timer timer_deserialize("deserialization");
+    dtimerInit(timer_deserialize, "deserialization");
 
     amf::Deserializer deserializer;
     
@@ -3720,7 +3817,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 	int width = sx;
 	int height = sz;
 
-    timer_deserialize.count();
+    dtimerStop(timer_deserialize);
 
 	pixels = (unsigned int*)calloc(width*height, 4);
 
@@ -3754,7 +3851,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
                 int bx, by, bz;
                 getIndexBlock(topBlockIndex, bx, by, bz, sx, sz);
                 Point coords;
-                getCoordsFromBlock(br.bounds_tl.data(), bx, by, bz, coords);
+                getCoordsFromBlock(br.bounds_tl, bx, by, bz, coords);
                 cq.x = coords.x;
                 cq.y = coords.y;
                 cq.corners = br.cornerClouds;
@@ -4059,11 +4156,8 @@ void GKOTHandleDebugBoxes(struct mg_connection *conn, void *cbdata, const mg_req
 
 	mc->load(&all, &ground);
 
-	double origin[3] = {
-		462000,
-		101000,
-		0
-	};
+    Vec origin;
+    origin << 462000, 101000, 0;
 
 	int *classMap = (int*)calloc(sizeof(int)*mw*mh, 1);
 
@@ -4179,11 +4273,8 @@ void DOF84HandleDebug(struct mg_connection *conn, void *cbdata, const mg_request
 
     mc->load(&all, &ground);
 
-    double origin[3] = {
-        462000,
-        101000,
-        0
-    };
+    Vec origin;
+    origin << 462000, 101000, 0;
 
     unsigned char *map = static_cast<unsigned char*>(mc->map.data);
     assert(map);
@@ -4310,7 +4401,7 @@ MainHandler(struct mg_connection *conn, void *cbdata)
 
     //const char* status;
 
-    if (strcmp(info->request_uri, "/GKOT/box") == 0) {
+    if (strcmp(info->request_uri, "/gkot/box") == 0) {
 		GKOTHandleBox(conn, cbdata, info);
 	} else if (strcmp(info->request_uri, "/dashboard/") == 0) {
 		mg_send_file(conn, "../../www/dashboard/dashboard.html");
@@ -4320,9 +4411,9 @@ MainHandler(struct mg_connection *conn, void *cbdata)
         GKOTHandleDashboardMapClouds(conn, cbdata, info);
     } else if (strcmp(info->request_uri, "/dashboard/stats.json") == 0) {
         GKOTHandleDashboardStats(conn, cbdata, info);
-    } else if (strcmp(info->request_uri, "/GKOT/debug") == 0) {
+    } else if (strcmp(info->request_uri, "/gkot/debug") == 0) {
         GKOTHandleDebug(conn, cbdata, info);
-    } else if (strcmp(info->request_uri, "/GKOT/debugBoxes") == 0) {
+    } else if (strcmp(info->request_uri, "/gkot/debugBoxes") == 0) {
 		GKOTHandleDebugBoxes(conn, cbdata, info);
 	} else if (startsWith(info->request_uri, "/debug/tile_") && endsWith(info->request_uri, ".png")) {
 		GKOTHandleTile(conn, cbdata, info);
@@ -4377,8 +4468,8 @@ int main(int argc, char *argv[])
 	src.y = origin.y() + 456;
 	src.z = origin.z() + 67;
 	int bx, by, bz;
-	getBlockFromCoords(origin.data(), src, bx, by, bz);
-	getCoordsFromBlock(origin.data(), bx, by, bz, dst);
+	getBlockFromCoords(origin, src, bx, by, bz);
+	getCoordsFromBlock(origin, bx, by, bz, dst);
 
 	vassert(src.x == dst.x, "Block transformation test failed for X");
 	vassert(src.y == dst.y, "Block transformation test failed for Y");
