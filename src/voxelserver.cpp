@@ -14,6 +14,9 @@
 #include <mutex>
 #include <list>
 #include <map>
+#include <functional> 
+#include <cctype>
+#include <locale>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -51,6 +54,9 @@
 #include "nanoflann.hpp"
 
 #include "ujson/ujson.hpp"
+
+#include "DBFEngine/dbf.h"
+
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -105,17 +111,27 @@ struct PlogScope
 };
 #define plogScope() PlogScope plog_scope_struct
 
-static const char *gkotPathFormat = "W:/gis/arso/laz/gkot/b_35/D96TM/TM_%d_%d.laz";
-static const char *dof84PathFormat = "W:/gis/arso/dof84/b_35/%d_%d.png";
+static const char* fishnetPath = "W:/gis/arso/fishnet/LIDAR_FISHNET_D96.dbf";
 
-static const char *otrPathFormat = "W:/gis/arso/laz/otr/b_35/D96TM/TMR_%d_%d.laz";
-static const char *nanoflannAllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.kdz";
-static const char *nanoflannGroundPathFormat = "W:/gis/arso/nanoflann/otr/b_35/D96TM/TM_%d_%d.kdtree";
+static const char* nameFormat = "%d_%d";
+static const char* gkotPathFormat = "W:/gis/arso/laz/gkot/%s/D96TM/TM_%s.laz";
+static const char* dof84PathFormat = "W:/gis/arso/dof84/%s/%s.png";
+
+/*
+static const char* otrPathFormat = "W:/gis/arso/laz/otr/b_35/D96TM/TMR_%d_%d.laz";
+static const char* nanoflannAllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96TM/TM_%d_%d.kdz";
+static const char* nanoflannGroundPathFormat = "W:/gis/arso/nanoflann/otr/b_35/D96TM/TM_%d_%d.kdtree";
+*/
 
 typedef double pcln;
 typedef Eigen::Vector3d Vec;
 
-Vec origin;
+// Ljubljana
+Vec origin{ 462000, 101000, 200 };
+
+// Bled
+//Vec origin{ 430350, 135776, 400 };
+//Vec origin{ 431785, 136409, 400 };
 
 enum Classification
 {
@@ -452,7 +468,7 @@ static const std::list<ClassificationFilter> classificationFilters = {
 };
 
 
-std::vector<std::string> &split(const std::string &s, char delim, std::vector<std::string> &elems) {
+static inline std::vector<std::string> &split(const std::string &s, char delim, std::vector<std::string> &elems) {
 	std::stringstream ss(s);
 	std::string item;
 	while (std::getline(ss, item, delim)) {
@@ -461,11 +477,27 @@ std::vector<std::string> &split(const std::string &s, char delim, std::vector<st
 	return elems;
 }
 
-
-std::vector<std::string> split(const std::string &s, char delim) {
+static inline std::vector<std::string> split(const std::string &s, char delim) {
 	std::vector<std::string> elems;
 	split(s, delim, elems);
 	return elems;
+}
+
+// trim from start
+static inline std::string &ltrim(std::string &s) {
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), std::not1(std::ptr_fun<int, int>(std::isspace))));
+    return s;
+}
+
+// trim from end
+static inline std::string &rtrim(std::string &s) {
+    s.erase(std::find_if(s.rbegin(), s.rend(), std::not1(std::ptr_fun<int, int>(std::isspace))).base(), s.end());
+    return s;
+}
+
+// trim from both ends
+static inline std::string &trim(std::string &s) {
+    return ltrim(rtrim(s));
 }
 
 
@@ -706,8 +738,8 @@ bool getParamBool(const char *queryString, size_t queryLength, const char *name)
 #define debug(format, ...) plog(format, __VA_ARGS__)
 #define dtimer(name) Timer timer(name)
 #define dtimerInit(var_id, name) Timer timer_ ## var_id {name}
-#define dtimerStart(var_id) timer_ ## var_id ## .tick()
-#define dtimerStop(var_id) timer_ ## var_id ## .count()
+#define dtimerStart(var_id) timer_ ## var_id .tick()
+#define dtimerStop(var_id) timer_ ## var_id .count()
 #else
 #define debug(format, ...) 
 #define dtimer(name)
@@ -834,6 +866,64 @@ int readInt(const amf::u8 *p)
 {
     return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
 }
+
+
+class Fishnet
+{
+
+    DBF dbf;
+
+    int records;
+    int fields;
+
+    std::string blockNotAvailable{"b_NA"};
+    std::map<std::string, std::string> nameToBlock;
+
+    int getFieldIndexFromName(const char *name) {
+        for (size_t i = 0; i < fields; i++)
+        {
+            if (dbf.GetFieldName(i) == name) return i;
+        }
+        return -1;
+    }
+
+public:
+    Fishnet() {}
+
+    bool load(const char *path) {
+        int ret = dbf.open(path);
+        if (ret) {
+            return false;
+        }
+        
+        records = dbf.GetNumRecords();
+        fields = dbf.GetNumFields();
+
+        int colName = getFieldIndexFromName("NAME"); vassert(colName > -1, "Column not found: NAME");
+        int colBlock = getFieldIndexFromName("BLOK"); vassert(colBlock > -1, "Column not found: BLOK");
+        
+        for (size_t i = 0; i < records; i++) {
+            dbf.loadRec(i);
+            std::string name = dbf.readField(colName); rtrim(name);
+            std::string block = dbf.readField(colBlock); rtrim(block);
+            nameToBlock.insert(std::make_pair(name, block));
+        }
+
+        dbf.close();
+
+        return true;
+    }
+
+    const std::string& getBlockFromName(std::string name) {
+        auto it = nameToBlock.find(name);
+        if (it == nameToBlock.end()) return blockNotAvailable;
+        return it->second;
+    }
+
+};
+
+Fishnet fishnet;
+
 
 struct Point
 {
@@ -1680,14 +1770,19 @@ MapCloud* getMapCloud(int lat, int lon)
 
     //plog("Initializing new map cloud at %d, %d", lat, lon);
 
-    char allPath[1024],
+    char name[10],
+         allPath[1024],
          dof84Path[1024];
          //treeAllPath[1024],
          //groundPath[1024],
          //treeGroundPath[1024];
 
-    sprintf_s(allPath, gkotPathFormat, lat, lon);
-    sprintf_s(dof84Path, dof84PathFormat, lat, lon);
+    sprintf_s(name, nameFormat, lat, lon);
+
+    std::string block = fishnet.getBlockFromName(name);
+
+    sprintf_s(allPath, gkotPathFormat, block.c_str(), name);
+    sprintf_s(dof84Path, dof84PathFormat, block.c_str(), name);
 
     //sprintf_s(groundPath, otrPathFormat, lat, lon);
     //sprintf_s(treeAllPath, nanoflannAllPathFormat, lat, lon);
@@ -1816,7 +1911,7 @@ static unsigned int classificationToBlock(unsigned int cv)
     case Classification::VEGETATION_MEDIUM: bv = BLOCK_LEAVES_SPRUCE; break;
     case Classification::VEGETATION_HIGH:   bv = BLOCK_LEAVES_OAK; break;
     case Classification::BUILDING:          bv = BLOCK_WOOL_LIGHTGRAY; break;
-    case Classification::LOW_POINT:         bv = BLOCK_WOOL_BLACK; break;
+    case Classification::LOW_POINT:         bv = BLOCK_AIR; break;
     case Classification::WATER:             bv = BLOCK_WATER; break;
 
     /*
@@ -1832,7 +1927,7 @@ static unsigned int classificationToBlock(unsigned int cv)
     case Classification::GROUND_ASPHALT:    bv = BLOCK_STONE; break;
     case Classification::GROUND_CONCRETE:   bv = BLOCK_WOOL_LIGHTGRAY; break;
     case Classification::SHADOW:            bv = BLOCK_WOOL_BLUE; break;
-    default:                                bv = BLOCK_WOOL_BLACK; break;
+    default:                                bv = BLOCK_AIR; break;
     }
 
     //if (bv != BLOCK_DIRT) bv = BLOCK_AIR;
@@ -3161,9 +3256,6 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
             // If there is any water to deepen
             if (waterSurfaceLevel != -1) {
 
-                Vec block_center; block_center << 0.5, 0.5, 0.5;
-                Vec query_block_center;
-
                 int by = waterSurfaceLevel;
 
                 for (int iz = 0; iz < sz; iz++) {
@@ -3968,6 +4060,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
 void GKOTHandleDashboardBoxes(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
+    dtimer("dash boxes");
     MapImage img;
     renderBoxesUsed(img);
     sendLiveImageHeader(conn, img.size);
@@ -3977,6 +4070,7 @@ void GKOTHandleDashboardBoxes(struct mg_connection *conn, void *cbdata, const mg
 
 void GKOTHandleDashboardMapClouds(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
+    dtimer("dash map clouds");
     MapImage img;
     renderMapClouds(img);
     sendLiveImageHeader(conn, img.size);
@@ -3986,6 +4080,7 @@ void GKOTHandleDashboardMapClouds(struct mg_connection *conn, void *cbdata, cons
 
 void GKOTHandleDashboardStats(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
+    dtimer("dash stats");
     ujson::value json = to_json(runtimeCounters);
     std::string str = ujson::to_string(json);
     sendLiveJSONHeader(conn, str.size());
@@ -4443,7 +4538,6 @@ MainHandler(struct mg_connection *conn, void *cbdata)
 
 int main(int argc, char *argv[])
 {
-	origin << 462000, 101000, 200;
 
     memset(blockToColor, 0, sizeof(blockToColor));
     blockToColor[0x023] = 0xE0E0E0;
@@ -4463,17 +4557,20 @@ int main(int argc, char *argv[])
     blockToColor[0xE23] = 0xA32C28;
     blockToColor[0xF23] = 0x181414;
 
+    Vec test{ 462000, 101000, 200 };
 	Point src, dst;
-	src.x = origin.x() + 123;
-	src.y = origin.y() + 456;
-	src.z = origin.z() + 67;
+	src.x = test.x() + 123;
+	src.y = test.y() + 456;
+	src.z = test.z() + 67;
 	int bx, by, bz;
-	getBlockFromCoords(origin, src, bx, by, bz);
-	getCoordsFromBlock(origin, bx, by, bz, dst);
+	getBlockFromCoords(test, src, bx, by, bz);
+	getCoordsFromBlock(test, bx, by, bz, dst);
 
 	vassert(src.x == dst.x, "Block transformation test failed for X");
 	vassert(src.y == dst.y, "Block transformation test failed for Y");
 	vassert(src.z == dst.z, "Block transformation test failed for Z");
+
+    vassert(fishnet.load(fishnetPath), "Unable to open fishnet database: %s", fishnetPath);
 
     const char *options[] = {
         "listening_ports", PORT,

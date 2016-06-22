@@ -1,8 +1,9 @@
 var d3stats;
 var d3execTimeList;
 var d3execTimeBars;
+var execTimeIndexes = {};
+var execTimeCount = 0;
 var execTimeSeries = {};
-var execTimeSeriesCount = 0;
 var colors;
 var barChart;
 var excluded = [];
@@ -21,6 +22,15 @@ function updateCharts(raw) {
         return counter.type == EXEC_TIME;
     });
 
+    dataTime.forEach(function(counter) {
+        var ti = execTimeIndexes[counter.id];
+        if (ti === undefined) {
+            ti = execTimeCount;
+            execTimeCount++;
+            execTimeIndexes[counter.id] = ti;
+        }
+    }, this);
+
     dataTimeExcl = dataTime.filter(function(counter) {
         return excluded.indexOf(counter.name) == -1; 
     })
@@ -31,9 +41,8 @@ function updateCharts(raw) {
         var ts = execTimeSeries[counter.id];
         if (!ts) {
             series = new TimeSeries();
-            ts = execTimeSeries[counter.id] = { index: execTimeSeriesCount, series: series };
+            ts = execTimeSeries[counter.id] = { index: execTimeIndexes[counter.id], series: series };
             chart.addTimeSeries(series, { lineWidth: 4, strokeStyle: colors(ts.index) });
-            execTimeSeriesCount++;
         }
         var value = counter.value*1e-3;
         stacked += value;
@@ -91,7 +100,15 @@ function updateCharts(raw) {
                 if (checked) {
                     if (index != -1) excluded.splice(index, 1);
                 } else {
-                    if (index == -1) excluded.push(name);
+                    if (index == -1) {
+                        excluded.push(name);
+                        
+                        var ts = execTimeSeries[name];
+                        if (ts) {
+                            var time = new Date().getTime();
+                            ts.series.append(time, 0);
+                        }
+                    }
                 }
             }
         })
@@ -100,7 +117,7 @@ function updateCharts(raw) {
     var labels = list.select(".label")
 
     labels
-        .style("background-color", function(counter) { return colors(execTimeSeries[counter.id].index) })
+        .style("background-color", function(counter) { return colors(execTimeIndexes[counter.id]) })
     
     labels.select(".name")
         .text(function(counter) { return counter.name })
@@ -201,10 +218,10 @@ $(document).ready(function() {
     nv.addGraph(function() {
         barChart = nv.models.multiBarHorizontalChart()
             .x(function(d) { return d.name })
-            .y(function(d) { return d.value })
-            .barColor(colors.range())
+            .y(function(d) { return d.value*1e-3 })
+            .barColor(function(d) { return colors(execTimeIndexes[d.id]) })
             .duration(250)
-            .margin({left: 120})
+            .margin({left: 130})
             .showControls(false)
             .showLegend(false)
             // .y(function(d) { console.log(d); return d; })

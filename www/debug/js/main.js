@@ -1,8 +1,20 @@
+// var origin = {
+//     x: 0,
+//     z: -1000,
+//     y: 0
+// }
+
+// var origin = {
+//     x: 462000,
+//     z: 101000,
+//     y: 0
+// }
+
 var params = {
     
     ox: 0,
+    oz: -128*0,
     oy: 0,
-    oz: -128*4,
     
     sx: 128, sz: 128,
     // sx: 256, sz: 256,
@@ -61,6 +73,11 @@ function getTilesHTML(params) {
 }
 
 function updateTiles(params) {
+    // Move to origin
+    // params.ox += Math.floor(origin.x/params.sx)*params.sx;
+    // params.oz += Math.floor(origin.z/params.sz)*params.sz;
+    // params.oy += origin.y;
+
     // Center
     params.ox += -params.sx*Math.floor(params.gw/2);
     params.oz += -params.sz*Math.floor(params.gh/2);

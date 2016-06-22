@@ -9,7 +9,27 @@
             }
             
             #execTime {
-                margin: 20px 0;
+                margin: 25px 0;
+            }
+            
+            #header {
+                margin: 10px;
+            }
+
+            #header i.cube.icon {
+                margin-right: 0px;
+            }
+
+            #overview {
+                margin-top: 20px;
+            }
+
+            #execTimeList {
+                margin: 10px 10px 10px 10px;
+            }
+            #execTimeList > div {
+                width: 250px;
+                margin: 3px 5px;
             }
             
             /*
@@ -22,44 +42,50 @@
             */
         </style>
     </head>
+
+        <h1 id="header" class="ui grey header">
+            <i class="cube icon"></i>
+            voxelserver dashboard
+        </h1>
         
+        <h2>Metrics</h2>
         <div id="stats" class="ui statistics">
         </div>
         
-        <div class="ui segment">
-            <div class="ui grid">
-                <div class="four wide column">
-                    <div id="execTimeList" class="ui list"></div>
-                </div>
-                <div class="six wide column">
-                    <canvas id="execTime" height="340px" />  
-                </div>
-                <div class="six wide column">
-                    <div id="execTimeBars"><svg height="400px" /></div>
+        <div id="overview" class="ui grid">
+            <div class="twelve wide column">
+                <div class="ui grid">
+                    <div class="sixteen wide column">
+                        <h2>Execution times</h2>
+                        <div id="execTimeList" class="ui grid"></div>
+                    </div>
+                    <div class="eight wide column">
+                        <canvas id="execTime" height="380px" />  
+                    </div>
+                    <div class="eight wide column">
+                        <div id="execTimeBars"><svg height="450px" /></div>
+                    </div>
                 </div>
             </div>
-        </div>
-        
-        <div class="ui cards">
+            <div class="four wide column">
                 
-            <div class="ui card">
-                <div class="image">
-                    <img id="boxes" src="" />
+                <div class="ui card">
+                    <div class="image">
+                        <img id="boxes" src="" />
+                    </div>
+                    <div class="content">
+                        <a class="header">Most recent box access</a>
+                    </div>
                 </div>
-                <div class="content">
-                    <a class="header">Boxes</a>
+                <div class="ui card">
+                    <div class="image">
+                        <img id="mapClouds" src="" />
+                    </div>
+                    <div class="content">
+                        <a class="header">Map cloud reader usage</a>
+                    </div>
                 </div>
             </div>
-
-            <div class="ui card">
-                <div class="image">
-                    <img id="mapClouds" src="" />
-                </div>
-                <div class="content">
-                    <a class="header">Map Clouds</a>
-                </div>
-            </div>
-            
         </div>
 
         <script src="js/vendor/jquery-2.2.1.js"></script>

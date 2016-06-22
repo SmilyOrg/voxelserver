@@ -31,6 +31,8 @@ file(GLOB src
   
 	ujson/ujson.cpp
 	ujson/double-conversion.cc
+
+	DBFEngine/dbf.cpp
 )
 
 list(REMOVE_ITEM src
