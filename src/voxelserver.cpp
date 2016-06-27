@@ -513,6 +513,7 @@ public:
 
     void add(RuntimeCounter *c);
     RuntimeCounter* get(const char *id);
+    void count();
 
 } runtimeCounters;
 
@@ -521,9 +522,10 @@ enum RuntimeCounterType {
     EXEC_TIME
 };
 
-class RuntimeCounter {
-    typedef unsigned long Count;
+class Timer;
 
+typedef unsigned long Count;
+class RuntimeCounter {
     std::atomic<Count> count;
 
 public:
@@ -531,9 +533,10 @@ public:
     const char *id;
     const char *name;
 
-    RuntimeCounter(RuntimeCounterType type, const char *id, const char *name) : type(type), id(id), name(name) {
-        count = 0;
-        reset();
+    Timer *timer;
+
+    RuntimeCounter(RuntimeCounterType type, const char *id, const char *name)
+        : type(type), id(id), name(name), timer(nullptr), count(0) {
         runtimeCounters.add(this);
     }
 
@@ -546,6 +549,7 @@ public:
         return c;
     }
 
+    void addTimer();
 };
 
 
@@ -589,13 +593,93 @@ ADD_COUNTER(requestsServed, "Requests served");
 
 #if __cplusplus < 201103L && (!defined(_MSC_VER) || _MSC_VER < 1700)
 #error Timer requires C++11
-#else
+#elif 1
 #include <chrono>
 class Timer {
     typedef std::chrono::high_resolution_clock clock;
     typedef std::chrono::nanoseconds ns;
 
+    std::mutex mutex;
+
     clock::time_point start;
+    unsigned long counted;
+
+    const char *name;
+    bool printed;
+    //bool counted;
+    RuntimeCounter *counter;
+
+public:
+    Timer(const char *name)
+    {
+        this->name = name;
+        tick();
+        counter = runtimeCounters.get(name);
+        if (!counter) {
+            counter = new RuntimeCounter(RuntimeCounterType::EXEC_TIME, name, name);
+        }
+        counter->timer = this;
+    }
+    ~Timer()
+    {
+        count();
+        counter->timer = nullptr;
+    }
+
+    unsigned long getCountedMicro()
+    {
+        return counted;
+    }
+
+    bool count()
+    {
+        /*
+        if (counted) return false;
+        *counter += (unsigned long)(tock().count() / 1000L);
+        counted = true;
+        */
+        if (counter == nullptr) return false;
+        unsigned long c = tock().count() / 1000L;
+        *counter += c - counted;
+        counted = c;
+        return true;
+    }
+
+    void tick()
+    {
+        printed = false;
+        counted = 0;
+        start = clock::now();
+    }
+    ns tock() const
+    {
+        return std::chrono::duration_cast<ns>(clock::now() - start);
+    }
+    void print()
+    {
+        long long c = tock().count();
+        printed = true;
+        const char *unit;
+        if (c < 1000) {
+            unit = "ns";
+        }
+        else if (c < 1000000l) {
+            c /= 1000l;
+            unit = "us";
+        }
+        else {
+            c /= 1000000l;
+            unit = "ms";
+        }
+        plog("%s %*s%ld%s", name, (int)(20 - strlen(name)), " ", c, unit);
+    }
+};
+#elif 0
+class Timer {
+    static HANDLE process;
+    typedef ULARGE_INTEGER timestamp;
+
+    timestamp start;
     const char *name;
     bool printed;
     bool counted;
@@ -612,6 +696,14 @@ public:
     ~Timer()
     {
         count();
+    }
+
+    timestamp getCPUTime()
+    {
+        timestamp now, sys, user;
+
+        GetProcessTimes(process, reinterpret_cast<FILETIME*>(&time), reinterpret_cast<FILETIME*>(&time), reinterpret_cast<FILETIME*>(&sys), reinterpret_cast<FILETIME*>(&user));
+
     }
 
     bool count()
@@ -652,7 +744,14 @@ public:
 };
 #endif
 
+void RuntimeCounter::addTimer() {
+    if (timer) timer->count();
+}
 
+void RuntimeCounters::count() {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto &iter : list) { iter->addTimer(); } //if (iter->timer != nullptr) iter->timer->count(); }
+}
 
 
 
@@ -1770,7 +1869,7 @@ MapCloud* getMapCloud(int lat, int lon)
 
     //plog("Initializing new map cloud at %d, %d", lat, lon);
 
-    char name[10],
+    char name[512],
          allPath[1024],
          dof84Path[1024];
          //treeAllPath[1024],
@@ -4081,6 +4180,7 @@ void GKOTHandleDashboardMapClouds(struct mg_connection *conn, void *cbdata, cons
 void GKOTHandleDashboardStats(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
     dtimer("dash stats");
+    runtimeCounters.count();
     ujson::value json = to_json(runtimeCounters);
     std::string str = ujson::to_string(json);
     sendLiveJSONHeader(conn, str.size());
