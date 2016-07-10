@@ -127,11 +127,23 @@ typedef double pcln;
 typedef Eigen::Vector3d Vec;
 
 // Ljubljana
-Vec origin{ 462000, 101000, 200 };
+//Vec origin{ 462000, 101000, 200 };
 
 // Bled
 //Vec origin{ 430350, 135776, 400 };
 //Vec origin{ 431785, 136409, 400 };
+
+// Smarna
+//Vec origin{ 458937, 109675, 300 };
+
+// Piran
+//Vec origin{ 388143, 43887, 0 };
+
+// Triglav
+//Vec origin{ 410750, 137541, 2550 };
+//Vec origin{ 410488, 138284, 2500 };
+Vec origin{ 410488, 138284, 2000 };
+
 
 enum Classification
 {

@@ -11,6 +11,15 @@ var excluded = [];
 var STAT = 0;
 var EXEC_TIME = 1;
 
+var exportUpdate = 0;
+var exportRows = [];
+var totalBoxes = 0;
+
+function exportTimes() {
+    var csvString = exportRows.join("\n");
+    var encodedUri = "data:text/csv;charset=utf-8," + encodeURI(csvString);
+    window.open(encodedUri);
+}
 
 function formatMicro(v) {
     return (v*1e-3).toFixed(2) + "ms";
@@ -30,6 +39,23 @@ function updateCharts(raw) {
             execTimeIndexes[counter.id] = ti;
         }
     }, this);
+
+
+    // var exportCols = [];
+    // var exportLine = [];
+    // dataTime.forEach(function(counter) {
+    //     var index = execTimeIndexes[counter.id];
+    //     exportLine[index] = counter.value;
+    //     exportCols[index] = counter.id;
+    //     // exportRows.push([index, exportUpdate, counter.value].join("\t"));
+    // }, this);
+    // if (!this.exportedHeader) {
+    //     exportRows.push(exportCols.join("\t"));
+    //     this.exportedHeader = true;
+    // }
+    // exportRows.push(exportLine.join("\t"));
+    // exportUpdate++;
+
 
     dataTimeExcl = dataTime.filter(function(counter) {
         return excluded.indexOf(counter.name) == -1; 
@@ -178,6 +204,16 @@ function loadStats() {
                 })
             }
             
+            if (created) {
+                totalBoxes += created.value;
+                data.push({
+                    type: STAT,
+                    id: "totalBoxes",
+                    name: "Total created boxes",
+                    value: totalBoxes
+                })
+            }
+                    
             updateStats(data);
             updateCharts(data);
             

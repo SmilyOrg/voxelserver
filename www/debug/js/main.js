@@ -20,8 +20,8 @@ var params = {
     // sx: 256, sz: 256,
     sy: 256,
     
-    gw: 10,
-    gh: 10,
+    gw: 8,
+    gh: 8,
     
     // type: "lidar",
     

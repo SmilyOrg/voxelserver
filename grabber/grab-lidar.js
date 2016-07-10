@@ -28,10 +28,27 @@ var ranges = [
         min: { x: 447247.90, y: 118731.50 },
         max: { x: 453928.63, y: 124922.75 },
     },
+    {
+        name: "Šmarna gora",
+        min: { x: 454843.38, y: 104168.26 },
+        max: { x: 461848.22, y: 113058.26 },
+    },
+    {
+        name: "Piran",
+        min: { x: 387600.49, y: 40519.20 },
+        max: { x: 391324.50, y: 44931.13 },
+    },
+    {
+        name: "Triglav",
+        min: { x: 409844.18, y: 136916.37 },
+        max: { x: 411717.43, y: 139003.93 },
+    },
 ]
 
 var found = [];
 
+var size = 1000;
+var hsize = size/2; 
 var statusReportDelay = 500;
 
 var queue = function(callback, length, noun, verbing, verbed) {
@@ -118,8 +135,8 @@ function parseDatabase(file) {
 
     parser.on('record', function(record) {
         ranges.forEach(function(range) {
-            if (record.CENTERX > range.min.x && record.CENTERX < range.max.x &&
-                record.CENTERY > range.min.y && record.CENTERY < range.max.y) {
+            if (record.CENTERX > range.min.x-hsize && record.CENTERX < range.max.x+hsize &&
+                record.CENTERY > range.min.y-hsize && record.CENTERY < range.max.y+hsize) {
                 record.range = range;
                 initRecordQueue.push(record);
             }
@@ -161,18 +178,19 @@ function initRecord(record, done) {
 
 function initResource(resource, done) {
 
+
     var record = resource.record;
     var config = resource.config;
 
     resource.params = {
         record: record,
         bounds: {
-            "min": { "x": record.CENTERX - 500, "y": record.CENTERY - 500 },
-            "max": { "x": record.CENTERX + 500, "y": record.CENTERY + 500 },
+            "min": { "x": record.CENTERX - hsize, "y": record.CENTERY - hsize },
+            "max": { "x": record.CENTERX + hsize, "y": record.CENTERY + hsize },
         },
         image: {
-            width: 1000,
-            height: 1000
+            width: size,
+            height: size
         }
     }
 
@@ -182,6 +200,7 @@ function initResource(resource, done) {
     resource.name = path.basename(resource.drain);
     if (existingDrains.indexOf(resource.drain) != -1) {
         duplicated++;
+        done();
         return;
     }
     existingDrains.push(resource.drain);
@@ -210,7 +229,6 @@ function initResource(resource, done) {
             }
 
             done();
-            
         });
     }
 
