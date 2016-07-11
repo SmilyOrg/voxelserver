@@ -966,7 +966,7 @@ class Fishnet
     int records;
     int fields;
 
-    std::string blockNotAvailable{"b_NA"};
+    std::string blockNotAvailable;
     std::map<std::string, std::string> nameToBlock;
 
     int getFieldIndexFromName(const char *name) {
@@ -978,7 +978,7 @@ class Fishnet
     }
 
 public:
-    Fishnet() {}
+    Fishnet() : blockNotAvailable("b_NA") {}
 
     bool load(const char *path) {
         int ret = dbf.open(path);
@@ -3194,7 +3194,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
     amf::Deserializer deserializer;
     
-    constexpr int size_int = 4;
+    const int size_int = 4;
     int bx, by, bz, maxHeight;
 
     auto it = br.data->cbegin();
