@@ -33,6 +33,8 @@ file(GLOB src
 	ujson/double-conversion.cc
 
 	DBFEngine/dbf.cpp
+	
+	fmt/format.cc
 )
 
 list(REMOVE_ITEM src
