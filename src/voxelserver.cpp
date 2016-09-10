@@ -966,7 +966,6 @@ class Fishnet
     int records;
     int fields;
 
-    std::string blockNotAvailable;
     std::map<std::string, std::string> nameToBlock;
 
     int getFieldIndexFromName(const char *name) {
@@ -978,6 +977,8 @@ class Fishnet
     }
 
 public:
+    const std::string blockNotAvailable;
+
     Fishnet() : blockNotAvailable("b_NA") {}
 
     bool load(const char *path) {
@@ -1629,6 +1630,8 @@ MapCloud* getMapCloud(int lat, int lon)
     std::string name = fmt::format(nameFormat, lat, lon);
     std::string block = fishnet.getBlockFromName(name);
 
+    if (block == fishnet.blockNotAvailable) return nullptr;
+
     std::string gkotPath = fmt::format(gkotFullFormat, block, name);
     std::string dof84Path = fmt::format(dof84FullFormat, block, name);
 
@@ -1982,8 +1985,6 @@ static void renderBoxesUsed(MapImage &img)
 {
     int hashEdge = static_cast<int>(round(sqrt(boxHash.size)));
 
-    plog("%d", hashEdge);
-
     int width = hashEdge;
     int height = width;
 
@@ -2176,6 +2177,54 @@ static Classification getBlockFromCloud(Vec origin, int bx, int by, int bz, Poin
     return maxClassification;
 }
 
+static int getCornerMapClouds(MapCloud** cornerClouds, const Vec min, const Vec max) {
+    const int cornerNum = 4;
+    const pcln corners[cornerNum][2] = {
+        { min.x(), min.y() },{ max.x(), min.y() },
+        { min.x(), max.y() },{ max.x(), max.y() }
+    };
+
+    int latlonCount = 0;
+    int latlon[cornerNum][3];
+
+    for (int i = 0; i < cornerNum; i++) {
+
+        cornerClouds[i] = nullptr;
+
+        int lat = static_cast<int>(floor(round(corners[i][0]) / 1000));
+        int lon = static_cast<int>(floor(round(corners[i][1]) / 1000));
+
+        //plog("%f %d %f %d", corners[i][0], lat, corners[i][1], lon);
+
+        //lat = std::max(std::min(lat, lat_max), lat_min);
+        //lon = std::max(std::min(lon, lon_max), lon_min);
+
+        bool duplicate = false;
+        for (int j = 0; j < latlonCount; j++) {
+            if (latlon[j][1] == lat && latlon[j][2] == lon) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        latlon[latlonCount][0] = i;
+        latlon[latlonCount][1] = lat;
+        latlon[latlonCount][2] = lon;
+        latlonCount++;
+    }
+
+    for (int i = 0; i < latlonCount; i++) {
+        int index = latlon[i][0];
+        int lat = latlon[i][1];
+        int lon = latlon[i][2];
+        MapCloud *mc = getMapCloud(lat, lon);
+        cornerClouds[index] = mc;
+    }
+
+    return latlonCount;
+}
+
 
 static std::mutex boxvisMutex;
 
@@ -2266,7 +2315,7 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 	// y -> x
 	// z -> y
 
-    static const int lat_min = MININT, lat_max = MAXINT, lon_min = MININT, lon_max = MAXINT;
+    //static const int lat_min = MININT, lat_max = MAXINT, lon_min = MININT, lon_max = MAXINT;
 	//static const int lat_min = 457, lat_max = 467, lon_min = 96, lon_max = 106;
 	//static const int lat_min = 462, lat_max = 462, lon_min = 101, lon_max = 101;
 
@@ -2295,51 +2344,12 @@ BoxResult& getBox(const long x, const long y, const long z, const long sx, const
 		//            //
 		dtimer("point load");
 
-		const int cornerNum = 4;
-		const pcln corners[cornerNum][2] = {
-			{ bounds_min.x(), bounds_min.y() }, { bounds_max.x(), bounds_min.y() },
-			{ bounds_min.x(), bounds_max.y() }, { bounds_max.x(), bounds_max.y() }
-		};
-
-		int latlonCount = 0;
-		int latlon[cornerNum][3];
-
-		for (int i = 0; i < cornerNum; i++) {
-
-			cornerClouds[i] = nullptr;
-
-			int lat = static_cast<int>(floor(round(corners[i][0]) / 1000));
-			int lon = static_cast<int>(floor(round(corners[i][1]) / 1000));
-
-            //plog("%f %d %f %d", corners[i][0], lat, corners[i][1], lon);
-
-			lat = std::max(std::min(lat, lat_max), lat_min);
-			lon = std::max(std::min(lon, lon_max), lon_min);
-
-			bool duplicate = false;
-			for (int j = 0; j < latlonCount; j++) {
-				if (latlon[j][1] == lat && latlon[j][2] == lon) {
-					duplicate = true;
-					break;
-				}
-			}
-			if (duplicate) continue;
-
-			latlon[latlonCount][0] = i;
-			latlon[latlonCount][1] = lat;
-			latlon[latlonCount][2] = lon;
-			latlonCount++;
-		}
-
-		for (int i = 0; i < latlonCount; i++) {
-			int index = latlon[i][0];
-			int lat = latlon[i][1];
-			int lon = latlon[i][2];
-			MapCloud *mc = getMapCloud(lat, lon);
-			cornerClouds[index] = mc;
-			mc->load(&all, &ground, bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
-		}
-
+        int count = getCornerMapClouds(cornerClouds, bounds_min, bounds_max);
+        for (int i = 0; i < 4; i++) {
+            MapCloud* mc = cornerClouds[i];
+            if (!mc) continue;
+            mc->load(&all, &ground, bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
+        }
 	}
 
 	{
@@ -3128,6 +3138,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 enum TileType {
 	TYPE_INVALID,
 	TYPE_LIDAR,
+    TYPE_RASTER,
 	TYPE_MAP
 };
 
@@ -3151,83 +3162,114 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 	TileType type =
 		token_type == "lidar" ? TYPE_LIDAR :
 		token_type == "map" ? TYPE_MAP :
+        token_type == "raster" ? TYPE_RASTER :
 		TYPE_INVALID;
 
 	if (type == TYPE_INVALID) { mg_send_http_error(conn, 400, "Unsupported tile type: %s", token_type.c_str()); return; }
 	
-	long sx = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
-	long sy = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
-	long sz = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
-	long x = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
-	long y = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
-	long z = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+    Vec req_origin;
+    long sx, sy = 0, sz, x, y = 0, z;
 
-	//mg_printf(conn, "Tile: %ld %ld %ld, %ld %ld %ld", x, y, z, sx, sy, sz);
+    // Parse the rest of the name based on the type
+    switch (type)
+    {
+        case TYPE_RASTER: {
+            req_origin[0] = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            req_origin[1] = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            req_origin[2] = 0;
 
-	BoxResult &br = getBox(x, y, z, sx, sy, sz, true);
+            sx = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            sz = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            x = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            z = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+        }; break;
 
-    /*
-    amf::Serializer serializer;
-    serializer << amf::AmfVector<unsigned int>(blocks);
-    serializer << amf::AmfVector<unsigned int>(columns);
-
-    amf::v8 arrays = serializer.data();
-
-    if (!br.data) br.data = new amf::v8();
-    amf::v8 *data = br.data;
-
-    const int size_int = 4;
-    size_t dataSize = 3 * size_int + arrays.size() + 1 * size_int;
-    data->resize(dataSize);
-    vassert(data->size() == dataSize, "%d %d", (int)data->size(), dataSize);
-
-    amf::u8 *p = data->data();
-    writeInt(p, bx); p += size_int;
-    writeInt(p, by); p += size_int;
-    writeInt(p, bz); p += size_int;
-    memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
-    writeInt(p, maxHeight); p += size_int;
-    */
-
-
-    dtimerInit(timer_deserialize, "deserialization");
-
-    amf::Deserializer deserializer;
-    
-    const int size_int = 4;
-    int bx, by, bz, maxHeight;
-
-    auto it = br.data->cbegin();
-
-    size_t datasize = br.data->size();
-   
-    bx = readInt(&*it); std::advance(it, size_int);
-    by = readInt(&*it); std::advance(it, size_int);
-    bz = readInt(&*it); std::advance(it, size_int);
+        default: {
+            sx = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            sy = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            sz = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            x = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            y = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+            z = strtol(request_tokens[token_index++].c_str(), nullptr, 10);
+        }; break;
+    }
 
     int sxyz = sx*sy*sz;
     int sxz = sx*sz;
-    
-    auto blocks_end = it;
-    std::advance(blocks_end, sxyz*size_int);
-    size_t size = std::distance(it, blocks_end);
-    size_t vsize = br.data->size();
-    size_t toend = std::distance(it, br.data->cend());
-    size_t tsize = static_cast<size_t>(blocks_end - it);
-    amf::AmfVector<unsigned int> amfblocks = deserializer.deserialize(it, br.data->cend()).as<amf::AmfVector<unsigned int>>();
-    amf::AmfVector<unsigned int> amfcolumns = deserializer.deserialize(it, br.data->cend()).as<amf::AmfVector<unsigned int>>();
 
-    maxHeight = readInt(&*it); std::advance(it, size_int);
+    std::vector<unsigned int>* blocks = nullptr;
+    std::vector<unsigned int>* columns = nullptr;
+    MapCloud* cornerClouds[4];
 
-    std::vector<unsigned int>& blocks = amfblocks.values;
-    std::vector<unsigned int>& columns = amfcolumns.values;
+    amf::AmfVector<unsigned int> amfblocks;
+    amf::AmfVector<unsigned int> amfcolumns;
+
+    // Load source data
+    switch (type)
+    {
+    case TYPE_RASTER: {
+        Vec bounds_tl;
+        Vec bounds_br;
+        Vec bounds_min;
+        Vec bounds_max;
+        getCoordsFromBlock(req_origin, x, y, z, bounds_tl);
+        getCoordsFromBlock(req_origin, x + sx, y + sy, z + sz, bounds_br);
+        bounds_min = bounds_tl.cwiseMin(bounds_br);
+        bounds_max = bounds_tl.cwiseMax(bounds_br);
+
+        int count = getCornerMapClouds(cornerClouds, bounds_min, bounds_max);
+
+        /*
+        plog("%d map clouds", count);
+        for (int i = 0; i < 4; i++) {
+            MapCloud* mc = cornerClouds[i];
+            if (!mc) continue;
+            plog("%d: lat %d lon %d", i, mc->lat, mc->lon);
+        }
+        */
+
+        }; break;
+
+    default: {
+
+        dtimer("deserialization");
+
+        BoxResult &br = getBox(x, y, z, sx, sy, sz, true);
+
+        amf::Deserializer deserializer;
+        const int size_int = 4;
+        int bx, by, bz, maxHeight;
+
+        auto it = br.data->cbegin();
+
+        size_t datasize = br.data->size();
+
+        bx = readInt(&*it); std::advance(it, size_int);
+        by = readInt(&*it); std::advance(it, size_int);
+        bz = readInt(&*it); std::advance(it, size_int);
+
+        auto blocks_end = it;
+        std::advance(blocks_end, sxyz*size_int);
+        size_t size = std::distance(it, blocks_end);
+        size_t vsize = br.data->size();
+        size_t toend = std::distance(it, br.data->cend());
+        size_t tsize = static_cast<size_t>(blocks_end - it);
+        amfblocks = deserializer.deserialize(it, br.data->cend()).as<amf::AmfVector<unsigned int>>();
+        amfcolumns = deserializer.deserialize(it, br.data->cend()).as<amf::AmfVector<unsigned int>>();
+
+        maxHeight = readInt(&*it); std::advance(it, size_int);
+
+        blocks = &amfblocks.values;
+        columns = &amfcolumns.values;
+
+        br.mutex.unlock();
+
+        }; break;
+    }
 
 	unsigned int *pixels;
 	int width = sx;
 	int height = sz;
-
-    dtimerStop(timer_deserialize);
-
 	pixels = (unsigned int*)calloc(width*height, 4);
 
 	vassert(pixels, "Unable to allocate memory for tile pixels");
@@ -3237,14 +3279,32 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
         for (int i = 0; i < width*height; i++) {
 
             int classification;
-
-            int h = columns[i];
-            int topBlockIndex = i + h*sxz;
-
-            classification = blocks[topBlockIndex];
-
             unsigned int rgb = 0xFF000000;
 
+            switch (type)
+            {
+                case TYPE_RASTER: {
+                    Vec coords;
+                    int ox = i%sx;
+                    int oz = i/sx;
+                    getCoordsFromBlock(req_origin, x + ox, y, z + oz, coords);
+                    rgb = MapCloud::getMapColor(cornerClouds, coords.x(), coords.y());
+                    /*
+                    rgb = -1;
+                    int mx, my;
+                    MapCloud* mc = MapCloud::fromCorners(cornerClouds, coords.x(), coords.y(), &mx, &my);
+                    if (mc) rgb = mc->lon*mc->lat;
+                    */
+                    if (rgb == -1) rgb = 0x000000;
+                }; break;
+
+                default:
+                    int h = columns->at(i);
+                    int topBlockIndex = i + h*sxz;
+                    classification = blocks->at(topBlockIndex);
+            }
+
+            /*
             switch (type)
             {
             case TYPE_MAP:
@@ -3256,7 +3316,6 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
                 }
                 ClassificationQuery cq;
 
-                /*
                 int bx, by, bz;
                 getIndexBlock(topBlockIndex, bx, by, bz, sx, sz);
                 Point coords;
@@ -3267,7 +3326,6 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
                 cq.lidar = static_cast<Classification>(classification);
                 cq.flags = ClassificationFlags::DEFAULT;
                 classification = mapCloud->getSpecializedClassification(cq);
-                */
 
                 //rgb = MapCloud::getMapColor(br.cornerClouds, coords.x, coords.y);
 
@@ -3293,6 +3351,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
             default:
                 break;
             }
+            */
 
             if (rgb == 0xFF000000) {
                 switch (classification)
@@ -3355,8 +3414,6 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
             pixels[i] = rgb;
         }
     }
-
-	br.mutex.unlock();
 
     MapImage img;
     {

@@ -43,6 +43,16 @@ var ranges = [
         min: { x: 409844.18, y: 136916.37 },
         max: { x: 411717.43, y: 139003.93 },
     },
+    {
+        name: "Bohinj",
+        min: { x: 407997.72, y: 124741.46 },
+        max: { x: 416259.34, y: 130972.40 },
+    },
+    {
+        name: "Maribor",
+        min: { x: 539405.46, y: 149183.21 },
+        max: { x: 560386.91, y: 164317.38 },
+    }
 ]
 
 var found = [];
@@ -312,7 +322,8 @@ function liberateFile(zlas, drain, done) {
     var cmd = liberator + " " + zlas + " " + drainTemp;
     exec(path.normalize(cmd), function(error, stdout, stderr) {
         if (error) {
-            fs.unlink(drainTemp);
+            console.error(stderr);
+            if (fileExists(drainTemp)) fs.unlink(drainTemp);
             if (done) done();
         } else {
             async.parallel([
