@@ -1,4 +1,4 @@
 build/
 build64/
 vis/
-www/node_modules/
+grabber/typings/

@@ -35,6 +35,8 @@ file(GLOB src
 	DBFEngine/dbf.cpp
 	
 	fmt/format.cc
+	
+	mappedfile/mappedfile.c
 )
 
 list(REMOVE_ITEM src

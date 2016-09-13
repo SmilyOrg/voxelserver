@@ -1,4 +1,6 @@
-var Parser = require('node-dbf');
+/// <reference path="../typings/index.d.ts" />
+
+var DBFParser = require('node-dbf');
 var fs = require('fs');
 var http = require('http');
 var path = require('path');
@@ -6,8 +8,20 @@ var mkdirp = require('mkdirp');
 var async = require('async');
 var exec = require('child_process').exec;
 var Mustache = require('mustache');
+var workerFarm = require('worker-farm');
+var printf = require('printf');
 
 var ranges = [
+    // {
+    //     name: "Ljubljana1",
+    //     min: { x: 462000.00, y: 101000.00 },
+    //     max: { x: 463000.00, y: 102000.00 },
+    // },
+    // {
+    //     name: "Ljubljana9",
+    //     min: { x: 462000.00, y: 101000.00 },
+    //     max: { x: 465000.00, y: 104000.00 },
+    // },
     {
         name: "Ljubljana",
         min: { x: 457262.46, y: 96189.57 },
@@ -53,7 +67,7 @@ var ranges = [
         min: { x: 539405.46, y: 149183.21 },
         max: { x: 560386.91, y: 164317.38 },
     }
-]
+];
 
 var found = [];
 
@@ -61,11 +75,13 @@ var size = 1000;
 var hsize = size/2; 
 var statusReportDelay = 500;
 
+var queues = [];
 var queue = function(callback, length, noun, verbing, verbed) {
     var q = async.queue(callback, length);
     q.noun = noun;
     q.verbing = verbing;
     q.verbed = verbed;
+    queues.push(q);
     return q;
 }.bind(this);
 
@@ -75,37 +91,59 @@ var processResourceQueue = queue(processResource, 10);
 var finishResourceQueue = queue(finishResource, 10);
 var downloadQueue = queue(
     processResourceWithFunction.bind(null, downloadFile),
-    2, "download", "downloading", "downloaded"
+    4, "download", "downloading", "downloaded"
 );
 var liberatorQueue = queue(
     processResourceWithFunction.bind(null, liberateFile),
     6, "liberation", "liberating", "liberated"
 );
+var dmrQueue = queue(
+    processDMRFile,
+    12, "dmr compression", "dmr compressing", "dmr compressed"
+);
 
 // http://gis.arso.gov.si/lidar/gkot/b_35/D96TM/TM_462_101.zlas
 // http://gis.arso.gov.si/lidar/otr/b_35/D96TM/TMR_462_101.zlas
 // http://gis.arso.gov.si/arcgis/rest/services/opensource_dof84/MapServer/export?bbox=462000%2C101000%2C463000.00%2C102000.00&bboxSR=3794&layers=&layerDefs=&size=1000%2C1000&imageSR=3794&format=png&transparent=false&dpi=&time=&layerTimeOptions=&dynamicLayers=&gdbVersion=&mapScale=&f=image
+// http://gis.arso.gov.si/lidar/dmr1/b_35/D96TM/TM1_462_102.asc
 
 var lidarRemote = "http://gis.arso.gov.si/";
 var lidarLocal = "W:/gis/arso/";
+var lidarLocalMass = "D:/gis/arso/";
 var liberator = lidarLocal + "lasliberate/bin/lasliberate.exe";
 
 var configs = [
     {
-        name: "lidar laz",
+        name: "laz",
         source: {
-            name: "lidar zlas",
+            name: "zlas",
             source:
                 lidarRemote +
-                 "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas",
+                "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas",
             drain:
-                lidarLocal +
+                lidarLocalMass +
                 "lidar/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.zlas"
         },
         drain:
             lidarLocal +
             "laz/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.laz",
         queue: liberatorQueue
+    },
+    {
+        name: "bdmr",
+        source: {
+            name: "dmr",
+            source:
+                lidarRemote +
+                "lidar/dmr1/{{record.BLOK}}/D96TM/TM1_{{record.NAME}}.asc",
+            drain:
+                lidarLocalMass +
+                "lidar/dmr1/{{record.BLOK}}/D96TM/TM1_{{record.NAME}}.asc",
+        },
+        drain:
+            lidarLocal +
+            "bdmr/{{record.BLOK}}/D96TM/TM1_{{record.NAME}}.bin",
+        queue: dmrQueue
     },
     {
         name: "map",
@@ -122,28 +160,32 @@ var configs = [
             lidarLocal +
             "dof84/{{record.BLOK}}/{{record.NAME}}.png"
     }
-]
+];
 
 var existingDrains = [];
 var duplicated = 0;
 var total = 0;
+
+var bdmrWorkers = workerFarm(require.resolve('./bdmr'));
+var dbfParsed = false;
 
 parseDatabase(lidarLocal + "fishnet/LIDAR_FISHNET_D96.dbf");
 
 
 
 function parseDatabase(file) {
-    var parser = new Parser(file);
+    var dbfParser = new DBFParser(file);
 
-    parser.on('start', function(p) {
-        console.log('db parsing');
+    dbfParser.on('start', function(p) {
+        // console.log('db parsing');
     });
 
-    parser.on('header', function(h) {
-        console.log("db header parsed");
+    dbfParser.on('header', function(h) {
+        // console.log("db header parsed");
+        
     });
 
-    parser.on('record', function(record) {
+    dbfParser.on('record', function(record) {
         ranges.forEach(function(range) {
             if (record.CENTERX > range.min.x-hsize && record.CENTERX < range.max.x+hsize &&
                 record.CENTERY > range.min.y-hsize && record.CENTERY < range.max.y+hsize) {
@@ -153,11 +195,12 @@ function parseDatabase(file) {
         }, this);
     });
 
-    parser.on('end', function(p) {
-        console.log('db parsed');
+    dbfParser.on('end', function(p) {
+        // console.log('db parsed');
+        dbfParsed = true;
     });
 
-    parser.parse();
+    dbfParser.parse();
 }
 
 function fileExists(path) {
@@ -168,12 +211,32 @@ function fileExists(path) {
     return !!(filestat && filestat.isFile());
 }
 
+function getTotalQueueLength() {
+    var qlen = queues.reduce(function(a, b) {
+        return a + b.length();
+    }, 0);
+    if (!dbfParsed) qlen++;
+    return qlen;
+}
+
 function plog(resource) {
-    console.log("  %s  %s  %s  %s",
+
+    var qlens = queues.reduce(function(a, b) {
+        return a + printf("%4d", b.length());
+    }, "");
+
+    console.log(printf("%s %12s %5s %16s  %s",
+        qlens,
         resource.record.range.name,
         resource.config.name,
         resource.name,
-        Array.prototype.slice.call(arguments).slice(1).join("\t"));
+        Array.prototype.slice.call(arguments).slice(1).join("\t")
+    ));
+    // console.log("  %s  %s  %s  %s",
+    //     resource.record.range.name,
+    //     resource.config.name,
+    //     resource.name,
+    //     Array.prototype.slice.call(arguments).slice(1).join("\t"));
 }
 
 function initRecord(record, done) {
@@ -187,22 +250,33 @@ function initRecord(record, done) {
 }
 
 function initResource(resource, done) {
-
-
+    
     var record = resource.record;
     var config = resource.config;
 
+    var nameSpl = resource.record.NAME.split("_", 2);
+    if (nameSpl.length != 2) {
+        console.error("Unable to split name to coordinates: " + nameSpl);
+        done();
+        return;
+    }
+
+    var coords = nameSpl.map(function(coord) { return Number(coord)*1000; });
+
     resource.params = {
         record: record,
+        coords: coords,
         bounds: {
-            "min": { "x": record.CENTERX - hsize, "y": record.CENTERY - hsize },
-            "max": { "x": record.CENTERX + hsize, "y": record.CENTERY + hsize },
+            "min": { "x": coords[0], "y": coords[1] },
+            "max": { "x": coords[0] + size, "y": coords[1] + size },
+            // "min": { "x": record.CENTERX - hsize, "y": record.CENTERY - hsize },
+            // "max": { "x": record.CENTERX + hsize, "y": record.CENTERY + hsize },
         },
         image: {
             width: size,
             height: size
         }
-    }
+    };
 
     total++;
 
@@ -273,6 +347,11 @@ function finishResource(resource, done) {
         resource.parent.source = resource.drain;
         processResourceQueue.push(resource.parent);
     }
+
+    if (getTotalQueueLength() === 0) {
+        workerFarm.end(bdmrWorkers);
+    }
+
     done();
 }
 
@@ -322,7 +401,7 @@ function liberateFile(zlas, drain, done) {
     var cmd = liberator + " " + zlas + " " + drainTemp;
     exec(path.normalize(cmd), function(error, stdout, stderr) {
         if (error) {
-            console.error(stderr);
+            console.error("Liberation error: " + stderr);
             if (fileExists(drainTemp)) fs.unlink(drainTemp);
             if (done) done();
         } else {
@@ -335,6 +414,32 @@ function liberateFile(zlas, drain, done) {
                 }
             ], done);
         }
+    });
+}
+
+function processDMRFile(resource, done) {
+    plog(resource, resource.config.queue.verbing);
+    var source = resource.source;
+    var drain = resource.drain;
+    var coords = resource.params.coords;
+
+    var ext = path.extname(drain);
+    var dir = path.dirname(drain);
+    var base = path.basename(drain, ext);
+    
+    var prefix = base + ".part";
+    var drainTemp = path.join(dir, prefix + ext);
+    
+    bdmrWorkers({
+        source: source,
+        drainTemp: drainTemp,
+        drain: drain,
+        coords: coords
+    }, function (err, output) {
+        if (err) console.error("bdmr worker execution error: " + err);
+        if (output.err) console.error("bdmr worker error: " + output.err);
+        finishResourceQueue.push(resource);
+        done();
     });
 }
 
