@@ -1,0 +1,1 @@
+build\RelWithDebInfo\voxelserver.exe --www=W:\cpp\voxelserver\www\ W:\gis\arso\

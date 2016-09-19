@@ -17,6 +17,7 @@
 #include <functional> 
 #include <cctype>
 #include <locale>
+#include <random>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -834,6 +835,13 @@ long getParamLong(const char *queryString, size_t queryLength, const char *name,
     return ret < 0 ? defaultValue : strtol(param, NULL, 10);
 }
 
+uint32_t getParamUInt(const char *queryString, size_t queryLength, const char *name, uint32_t defaultValue = 0)
+{
+    char param[20];
+    int ret = mg_get_var(queryString, queryLength, name, param, sizeof(param));
+    return ret < 0 ? defaultValue : strtoul(param, NULL, 10);
+}
+
 bool getParamBool(const char *queryString, size_t queryLength, const char *name)
 {
     char param[20];
@@ -962,12 +970,25 @@ void pushInt(amf::v8 &data, int v)
     data.push_back(v & 0xFF);
 }
 
+void writeUInt(amf::u8 *p, uint32_t v)
+{
+    p[0] = (v >> 24) & 0xFF;
+    p[1] = (v >> 16) & 0xFF;
+    p[2] = (v >> 8) & 0xFF;
+    p[3] = v & 0xFF;
+}
+
 void writeInt(amf::u8 *p, int v)
 {
     p[0] = (v >> 24) & 0xFF;
     p[1] = (v >> 16) & 0xFF;
     p[2] = (v >> 8) & 0xFF;
     p[3] = v & 0xFF;
+}
+
+uint32_t readUInt(const amf::u8 *p)
+{
+    return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
 }
 
 int readInt(const amf::u8 *p)
@@ -2309,7 +2330,7 @@ static void getBounds(const Vec &origin,
 
 // Position and size of the requested box (all block coordinates)
 // Returns mutex locked box (unlock when done)
-BoxResult& getBox(Vec origin, const long x, const long y, const long z, const long sx, const long sy, const long sz, const bool debug = false) {
+BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long y, const long z, const long sx, const long sy, const long sz, const bool debug = false) {
 
     if (sx <= 0 || sy <= 0 || sz <= 0) return invalidBoxResult;
 
@@ -3173,11 +3194,12 @@ BoxResult& getBox(Vec origin, const long x, const long y, const long z, const lo
         amf::v8 *data = br.data;
 
         const int size_int = 4;
-        size_t dataSize = 3 * size_int + arrays.size() + 1 * size_int;
+        size_t dataSize = 4 * size_int + arrays.size() + 1 * size_int;
         data->resize(dataSize);
         vassert(data->size() == dataSize, "%d %d", (int)data->size(), (int)dataSize);
 
         amf::u8 *p = data->data();
+        writeUInt(p, worldHash); p += size_int;
         writeInt(p, bx); p += size_int;
         writeInt(p, by); p += size_int;
         writeInt(p, bz); p += size_int;
@@ -3192,10 +3214,10 @@ BoxResult& getBox(Vec origin, const long x, const long y, const long z, const lo
     return br;
 }
 
-
 void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
     Vec origin;
+    uint32_t worldHash;
     long x = 0;
     long y = 0;
     long z = 0;
@@ -3208,6 +3230,8 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     const char *qs = info->query_string;
     size_t ql = strlen(info->query_string);
+
+    worldHash = getParamUInt(qs, ql, "worldHash");
 
     origin = {
         (double)getParamLong(qs, ql, "tmx"),
@@ -3239,7 +3263,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("sy    : %d\n", sy);
     debugPrint("sz / h: %d\n", sz);
 
-    BoxResult &br = getBox(origin, x, y, z, sx, sy, sz, debug);
+    BoxResult &br = getBox(worldHash, origin, x, y, z, sx, sy, sz, debug);
 
     if (&br == &invalidBoxResult) {
         printf("Invalid box %ld %ld %ld %ld %ld %ld\n", x, y, z, sx, sy, sz);
@@ -3256,6 +3280,90 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     debugPrint("</pre></body></html>\n");
 }
+
+
+void GKOTHandleOriginInfo(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
+{
+    const char *qs = info->query_string;
+    if (!qs) {
+        mg_send_http_error(conn, 400, "Missing query parameters");
+        return;
+    }
+
+    size_t ql = strlen(info->query_string);
+
+    int sy = 0;
+    
+    Vec origin = {
+        (double)getParamLong(qs, ql, "tmx"),
+        (double)getParamLong(qs, ql, "tmy"),
+        NAN
+    };
+
+    const pcln offsetSpread = 1000;
+    const int offsetNum = 5;
+    const int randNum = 200;
+    const int offsets[offsetNum][2] = {
+        {  0,  0 },
+        { -1, -1 }, {  1, -1},
+        { -1,  1 }, { -1,  1}
+    };
+
+    pcln zmin = std::numeric_limits<pcln>::max();
+    pcln zmax = std::numeric_limits<pcln>::min();
+
+    std::default_random_engine generator;
+    std::uniform_real_distribution<pcln> distribution(-offsetSpread, offsetSpread);
+
+    auto random = std::bind(distribution, generator);
+
+    for (int oi = 0; oi < offsetNum + randNum; oi++) {
+        pcln ox, oy;
+        if (oi < offsetNum) {
+            const int* offset = offsets[oi];
+            ox = offset[0] * offsetSpread;
+            oy = offset[1] * offsetSpread;
+        } else {
+            ox = random();
+            oy = random();
+        }
+        pcln x = origin.x() + ox;
+        pcln y = origin.y() + oy;
+        MapCloud* mc = getMapCloud((int)(x / mapTileWidth), (int)(y / mapTileHeight));
+        if (mc) {
+            int mx, my;
+            mc->getMapCoords(x, y, &mx, &my);
+            pcln height = mc->getPointHeight(mx, my);
+            if (!isnan(height)) {
+                zmin = std::min(zmin, height);
+                zmax = std::max(zmax, height);
+                //printf("%3d %4.2f %4.2f\n", oi, zmin, zmax);
+                if (ox == 0 && oy == 0) origin.z() = height;
+            }
+        }
+    }
+
+    if (isnan(origin.z())) origin.z() = -1;
+    if (isnan(zmin)) zmin = 100000;
+    if (isnan(zmax)) zmax = -100000;
+
+    ujson::value result = ujson::object{
+        { "tmx", origin.x() },
+        { "tmy", origin.y() },
+        { "tmz", origin.z() },
+        { "zmin", zmin },
+        { "zmax", zmax },
+        { "zrange", zmax - zmin }
+    };
+
+    mg_printf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n");
+
+    std::string resultString = ujson::to_string(result);
+
+    mg_printf(conn, "%s", resultString.c_str());
+    
+}
+
 
 enum TileType {
     TYPE_INVALID,
@@ -3356,16 +3464,18 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
         dtimer("deserialization");
 
-        BoxResult &br = getBox(default_origin, x, y, z, sx, sy, sz, true);
+        BoxResult &br = getBox(0, default_origin, x, y, z, sx, sy, sz, true);
 
         amf::Deserializer deserializer;
         const int size_int = 4;
+        uint32_t worldHash;
         int bx, by, bz, maxHeight;
 
         auto it = br.data->cbegin();
 
         size_t datasize = br.data->size();
 
+        worldHash = readUInt(&*it); std::advance(it, size_int);
         bx = readInt(&*it); std::advance(it, size_int);
         by = readInt(&*it); std::advance(it, size_int);
         bz = readInt(&*it); std::advance(it, size_int);
@@ -4047,6 +4157,8 @@ MainHandler(struct mg_connection *conn, void *cbdata)
 
     if (strcmp(info->request_uri, "/gkot/box") == 0) {
         GKOTHandleBox(conn, cbdata, info);
+    } else if (strcmp(info->request_uri, "/gkot/origin.json") == 0) {
+        GKOTHandleOriginInfo(conn, cbdata, info);
     } else if (strcmp(info->request_uri, "/dashboard/") == 0) {
         mg_send_file(conn, (webPath + "/dashboard/dashboard.html").c_str());
     } else if (strcmp(info->request_uri, "/dashboard/boxes.png") == 0) {
