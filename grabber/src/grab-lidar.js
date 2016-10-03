@@ -132,7 +132,8 @@ var configs = [
         drain:
             lidarLocal +
             "laz/gkot/{{record.BLOK}}/D96TM/TM_{{record.NAME}}.laz",
-        queue: liberatorQueue
+        queue: liberatorQueue,
+        deleteSource: true
     },
     {
         name: "bdmr",
@@ -297,7 +298,7 @@ function initResource(resource, done) {
     // plog(resource, "processing");
 
     if (fileExists(resource.drain)) {
-        resource.source = "[unsourced]";
+        resource.source = "";
         finishResourceQueue.push(resource);
         done();
     } else {
@@ -348,6 +349,16 @@ function finishResource(resource, done) {
     if (Date.now() - resource.startTime > statusReportDelay) {
         plog(resource, config.queue.verbed);
     }
+
+    // Delete source if configured
+    if (config.deleteSource && resource.source !== "" && fileExists(resource.source)) {
+        var deleteName = resource.source;
+        var lastSlash = resource.source.lastIndexOf("/");
+        if (lastSlash >= 0) deleteName = deleteName.substr(lastSlash + 1);
+        plog(resource, "deleting " + deleteName);
+        fs.unlink(resource.source);
+    }
+
     if (resource.parent) {
         resource.parent.source = resource.drain;
         processResourceQueue.push(resource.parent);
