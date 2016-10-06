@@ -8,8 +8,12 @@ var colors;
 var barChart;
 var excluded = [];
 
-var STAT = 0;
-var EXEC_TIME = 1;
+var STAT      = 0;
+var STATP     = 1;
+var EXEC_TIME = 2;
+
+var COUNTER   = 0;
+var BYTES     = 1;
 
 var exportUpdate = 0;
 var exportRows = [];
@@ -116,7 +120,7 @@ function updateCharts(raw) {
 
     list.exit().remove()
     
-    $(item[0].filter(function(obj) { return obj != null; }))
+    $(item[0].filter(function(obj) { return obj !== null; }))
         .checkbox({
             onChange: function() {
                 var check = $(this).parent();
@@ -155,7 +159,7 @@ function updateCharts(raw) {
 
 function updateStats(data) {
     
-    data = data.filter(function(counter) { return counter.type == STAT; });
+    data = data.filter(function(counter) { return counter.type == STAT || counter.type == STATP; });
     
     var stats = d3stats
         .selectAll(".statistic")
@@ -175,7 +179,12 @@ function updateStats(data) {
     stats.exit().remove();
     
     stats.select(".value")
-        .text(function(counter) { return counter.value.toLocaleString(); })
+        .text(function(counter) {
+            switch (counter.unit) {
+                case BYTES: return filesize(counter.value);
+            }
+            return counter.value.toLocaleString();
+        })
         
     stats.select(".label")
         .text(function(counter) { return counter.name; })
@@ -183,7 +192,7 @@ function updateStats(data) {
 
 function getCounter(data, id) {
     var filtered = data.filter(function(counter) { return counter.id == id; });
-    if (filtered.length == 0) return null;
+    if (filtered.length === 0) return null;
     return filtered[0];
 }
 

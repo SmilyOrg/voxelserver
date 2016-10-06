@@ -37,6 +37,8 @@ file(GLOB src
 	fmt/format.cc
 	
 	mappedfile/mappedfile.c
+	
+	lz4/lz4.c
 )
 
 list(REMOVE_ITEM src

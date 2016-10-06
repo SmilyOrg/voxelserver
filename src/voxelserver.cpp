@@ -57,6 +57,7 @@
 
 #include "DBFEngine/dbf.h"
 
+#include "lz4/lz4.h"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -87,7 +88,8 @@ using namespace nanoflann;
 typedef double pcln;
 typedef Eigen::Vector3d Vec;
 
-static const int defaultPower = 11;
+//static const int defaultPower = 11;
+static const int defaultPower = 15;
 
 static const char* nameFormat = "{0}_{1}";
 
@@ -111,6 +113,7 @@ static const int mapTileWidth = 1000;
 static const int mapTileHeight = 1000;
 
 static const pcln seaThreshold = 0.1;
+static const pcln waterMaxDepth = 20;
 
 static std::string gkotFullFormat;
 static std::string dof84FullFormat;
@@ -553,7 +556,13 @@ public:
 
 enum RuntimeCounterType {
     STAT,
+    STATP,
     EXEC_TIME
+};
+
+enum RuntimeCounterUnit {
+    COUNT,
+    BYTES
 };
 
 class Timer;
@@ -564,22 +573,25 @@ class RuntimeCounter {
 
 public:
     RuntimeCounterType type;
+    RuntimeCounterUnit unit;
     const char *id;
     const char *name;
 
     Timer *timer;
 
-    RuntimeCounter(RuntimeCounterType type, const char *id, const char *name)
-        : type(type), id(id), name(name), timer(nullptr), count(0) {
+    RuntimeCounter(const char *id, const char *name, RuntimeCounterType type = RuntimeCounterType::STAT, RuntimeCounterUnit unit = RuntimeCounterUnit::COUNT)
+        : type(type), unit(unit), id(id), name(name), timer(nullptr), count(0) {
         runtimeCounters.add(this);
     }
 
     Count operator++() { return ++count; }
+    Count operator--() { return --count; }
     Count operator+=(Count c) { return count += c; }
+    Count operator-=(Count c) { return count -= c; }
 
     Count reset() {
         Count c = count;
-        count = 0;
+        if (type != STATP) count = 0;
         return c;
     }
 
@@ -600,7 +612,7 @@ RuntimeCounter* RuntimeCounters::get(const char *id) {
 }
 
 
-#define ADD_COUNTER(id, name) RuntimeCounter id (RuntimeCounterType::STAT, #id, name);
+#define ADD_COUNTER(id, name, ...) RuntimeCounter id (#id, name, __VA_ARGS__);
 
 ujson::value to_json(RuntimeCounters const &rcs) {
     auto arr = ujson::array();
@@ -608,6 +620,7 @@ ujson::value to_json(RuntimeCounters const &rcs) {
         arr.push_back(
             ujson::object {
                 { "type", iter->type },
+                { "unit", iter->unit },
                 { "id", iter->id },
                 { "name", iter->name },
                 { "value", static_cast<double>(iter->reset()) }
@@ -622,6 +635,9 @@ ADD_COUNTER(boxesSent, "Boxes sent");
 ADD_COUNTER(boxesCreated, "Boxes created");
 ADD_COUNTER(pointsLoaded, "Points loaded");
 ADD_COUNTER(requestsServed, "Requests served");
+ADD_COUNTER(boxesCached, "Boxes cached", RuntimeCounterType::STATP);
+ADD_COUNTER(boxCacheBytes, "Box cache memory", RuntimeCounterType::STATP, RuntimeCounterUnit::BYTES);
+ADD_COUNTER(mapOrthoBytes, "Map ortho memory", RuntimeCounterType::STATP, RuntimeCounterUnit::BYTES);
 
 
 
@@ -650,7 +666,7 @@ public:
         tick();
         counter = runtimeCounters.get(name);
         if (!counter) {
-            counter = new RuntimeCounter(RuntimeCounterType::EXEC_TIME, name, name);
+            counter = new RuntimeCounter(name, name, RuntimeCounterType::EXEC_TIME);
         }
         counter->timer = this;
     }
@@ -777,6 +793,10 @@ public:
     }
 };
 #endif
+
+
+
+
 
 void RuntimeCounter::addTimer() {
     if (timer) timer->count();
@@ -978,6 +998,18 @@ void writeUInt(amf::u8 *p, uint32_t v)
     p[3] = v & 0xFF;
 }
 
+amf::u8* writeUIntVector(amf::u8 *p, const std::vector<unsigned int> &vec)
+{
+    size_t len = vec.size();
+    writeUInt(p, (uint32_t)len);
+    p += 4;
+    for (size_t i = 0; i < len; i++) {
+        writeUInt(&p[i << 2], vec[i]);
+    }
+    p += len << 2;
+    return p;
+}
+
 void writeInt(amf::u8 *p, int v)
 {
     p[0] = (v >> 24) & 0xFF;
@@ -994,6 +1026,18 @@ uint32_t readUInt(const amf::u8 *p)
 int readInt(const amf::u8 *p)
 {
     return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+
+const amf::u8* readUIntVector(const amf::u8 *p, std::vector<unsigned int> &vec)
+{
+    size_t len = readUInt(p);
+    p += 4;
+    vec.resize(len);
+    for (size_t i = 0; i < len; i++) {
+        vec[i] = readUInt(&p[i << 2]);
+    }
+    p += len << 2;
+    return p;
 }
 
 
@@ -1218,6 +1262,8 @@ public:
             all->addPoint(p);
             if (p.classification == Classification::GROUND) ground->addPoint(p);
         }
+
+        reader->inside_none();
     }
 };
 
@@ -1382,6 +1428,8 @@ public:
             int reqComp = 3;
             int retComp;
             map.data = stbi_load(mapPath.c_str(), &map.width, &map.height, &retComp, reqComp);
+            map.size = map.width*map.height*retComp;
+            mapOrthoBytes += map.size;
             if (map.data == nullptr) {
                 plog("Unable to open %s", mapPath.c_str());
             }
@@ -1565,7 +1613,7 @@ public:
             return NAN;
         }
 
-        int mapIndex = mx + my * bdmrWidth;
+        int mapIndex = mx + (mapTileHeight - 1 - my) * bdmrWidth;
         return bdmrMap[mapIndex] / (pcln)100;
     }
 
@@ -1788,6 +1836,11 @@ enum ExportPointCommand {
     ClassificationBase = 0x100
 };
 
+enum BoxCompression {
+    None,
+    LZ4
+};
+
 struct BoxResult {
     std::mutex mutex;
     
@@ -1799,7 +1852,12 @@ struct BoxResult {
     long x, y, z;
     long sx, sy, sz;
 
-    amf::v8 *data;
+    void *data;
+    size_t dataSize;
+
+    BoxCompression compression;
+    void *compressed;
+    size_t compressedSize;
 
     /*
     // TODO: Put stuff below into a supplementary class and observe mem usage
@@ -1824,7 +1882,17 @@ struct BoxResult {
     std::map<int, int> cidMap;
 #endif
 
-    BoxResult() : data(nullptr), access(0), valid(false) {};
+    BoxResult() :
+        data(nullptr),
+        dataSize(0),
+
+        compression(None),
+        compressed(nullptr),
+        compressedSize(0),
+
+        access(0),
+        valid(false) {};
+
     BoxResult(const BoxResult& br) {
         access = 0;
         valid = br.valid;
@@ -1837,10 +1905,100 @@ struct BoxResult {
         data = br.data;
     }
     ~BoxResult() {
-        if (data) delete data;
-        data = nullptr;
+        removeData();
+        removeCompressed();
     }
 
+private:
+    static void resizeArray(void** arr, size_t* storedSize, const size_t newSize) {
+        boxCacheBytes += newSize;
+        if (!*arr) {
+            *arr = malloc(newSize);
+        } else {
+            boxCacheBytes -= *storedSize;
+            *arr = realloc(*arr, newSize);
+        }
+        *storedSize = newSize;
+    }
+    static void removeArray(void** arr, const size_t size) {
+        if (!*arr) return;
+        boxCacheBytes -= size;
+        free(*arr);
+        *arr = nullptr;
+    }
+
+public:
+
+    void* getBuffer(size_t size) {
+        resizeArray(&data, &dataSize, size);
+        return data;
+    }
+
+    void compress() {
+        vassert(data, "Unable to compress null data");
+
+        dtimer("box compression");
+
+        compression = BoxCompression::LZ4;
+        resizeArray(&compressed, &compressedSize, LZ4_compressBound((int)dataSize));
+
+        int ret = LZ4_compress_default(reinterpret_cast<char*>(data), reinterpret_cast<char*>(compressed), (int)dataSize, (int)compressedSize);
+        vassert(ret > 0, "Unable to LZ4 compress: %d", ret);
+
+        resizeArray(&compressed, &compressedSize, ret);
+    }
+
+    void decompress() {
+        dtimer("box decompression");
+
+        if (data) return;
+
+        switch (compression)
+        {
+        case BoxCompression::None:
+            vassert(data, "Unable to decompress uncompressed data, original data not available");
+            break;
+        case BoxCompression::LZ4:
+        {
+            vassert(compressed, "Unable to LZ4 decompress null data");
+            size_t actuallyNew = 0;
+            resizeArray(&data, &actuallyNew, dataSize);
+            int ret = LZ4_decompress_safe(reinterpret_cast<char*>(compressed), reinterpret_cast<char*>(data), (int)compressedSize, (int)dataSize);
+            vassert(ret > 0, "Unable to LZ4 decompress: %d", ret)
+        }
+            break;
+        default:
+            vassert(false, "Unable to decompress, compression type unsupported: %d", compression);
+        }
+    }
+
+    void removeRedundant() {
+        if (compressed) removeData();
+    }
+
+    void removeCompressed() {
+        removeArray(&compressed, compressedSize);
+    }
+
+    void removeData() {
+        removeArray(&data, dataSize);
+    }
+
+    void send(struct mg_connection *conn) {
+        mg_printf(conn,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/x-amf\r\n"
+            NO_CACHE
+            "\r\n"
+        );
+        decompress();
+
+        vassert(data, "Unable to send box, data is null");
+
+        mg_write(conn, data, dataSize);
+
+        removeRedundant();
+    }
 
     void exportOpen() {
 #if EXPORT_BOX_DEBUG
@@ -1897,17 +2055,6 @@ struct BoxResult {
 #endif
     }
 
-
-    void send(struct mg_connection *conn) {
-        mg_printf(conn,
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/x-amf\r\n"
-            NO_CACHE
-            "\r\n"
-        );
-        assert(data);
-        mg_write(conn, data->data(), data->size());
-    }
 };
 
 static const long boxHashAccessStart = 0xFF;
@@ -2330,7 +2477,7 @@ static void getBounds(const Vec &origin,
 
 // Position and size of the requested box (all block coordinates)
 // Returns mutex locked box (unlock when done)
-BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long y, const long z, const long sx, const long sy, const long sz, const bool debug = false) {
+BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, const long z, const long sx, long sy, const long sz, const bool debug = false) {
 
     if (sx <= 0 || sy <= 0 || sz <= 0) return invalidBoxResult;
 
@@ -2347,6 +2494,11 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     int bx = x >> psx;
     int by = y >> psy;
     int bz = z >> psz;
+
+    // Required box height
+    int rsy = sy;
+    // Required box difference offset
+    int ry = -1;
 
     assert(1 << psx == sx);
     assert(1 << psy == sy);
@@ -2371,7 +2523,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     // Return cached if found
     if (!debug && br.valid &&
         br.origin == origin &&
-        br.x == x && br.y == y  && br.z == z &&
+        br.x == x && br.y == y && br.z == z &&
         br.sx == sx && br.sy == sy && br.sz == sz) {
         return br;
     }
@@ -2383,6 +2535,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     //         //
 
     // Not found in cache, update cached params
+    if (!br.valid) ++boxesCached;
     br.valid = false;
     br.origin = origin;
     br.x = x;
@@ -2409,7 +2562,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     std::vector<unsigned int> columns(sxz, 0);
     std::vector<unsigned int> groundCols(sxz, 0);
 
-    int count = 0;
+    size_t pointsUsed = 0;
     int minHeight = sy;
     int maxHeight = -1;
 
@@ -2421,19 +2574,28 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     //static const int lat_min = 457, lat_max = 467, lon_min = 96, lon_max = 106;
     //static const int lat_min = 462, lat_max = 462, lon_min = 101, lon_max = 101;
 
+    {
+        //             //
+        // Auto-height //
+        //             //
 
-    if (origin.z() == MAXLONG) {
-        dtimer("height read");
-        MapCloud* mc = getMapCloud((int)(origin.x() / mapTileWidth), (int)(origin.y() / mapTileHeight));
-        if (mc) {
-            int mx, my;
-            mc->getMapCoords(origin.x(), origin.y(), &mx, &my);
-            origin.z() = mc->getPointHeight(mx, my) - sy/2;
-            if (isnan(origin.z())) origin.z() = 0;
-        } else {
-            origin.z() = 0;
+        if (origin.z() == MAXLONG) {
+            dtimer("height read");
+            MapCloud* mc = getMapCloud((int)(origin.x() / mapTileWidth), (int)(origin.y() / mapTileHeight));
+            if (mc) {
+                int mx, my;
+                mc->getMapCoords(origin.x(), origin.y(), &mx, &my);
+                origin.z() = mc->getPointHeight(mx, my) - sy / 2;
+                if (isnan(origin.z())) origin.z() = 0;
+            }
+            else {
+                origin.z() = 0;
+            }
         }
     }
+
+    bool shrink = true;
+    bool shrunk = false;
 
 
     Vec bounds_tl;
@@ -2446,8 +2608,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
 
     int seaDummy, seaY;
     getBlockFromCoords(bounds_tl, Vec(0, 0, seaThreshold), seaDummy, seaY, seaDummy);
-
-    size_t num = 0;
 
     PointCloud all(50);
     PointCloud ground(20);
@@ -2475,6 +2635,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
         dtimer("quantization");
         size_t num = all.getPointNum();
         pointsLoaded += num;
+
         for (size_t i = 0; i < num; i++) {
             Point &p = all.getPoint(i);
 
@@ -2494,16 +2655,161 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
 
             blocks[index] = p.classification;
 
+            if (by < minHeight) minHeight = by;
+            if (by > maxHeight) maxHeight = by;
+            
             //printf("%d ", p.classification);
 
             //br.exportWrite(bx + 0.5, bz + 0.5, by + 0.5, -10);
 
-            count++;
+            pointsUsed++;
         }
     }
 
-    num = count;
+    {
+        //                      //
+        // Empty box into water //
+        //                      //
+        dtimer("box water");
 
+        if (pointsUsed == 0) {
+            int cornerNum = 4;
+            Vec query_block_center;
+            ClassificationQuery cq;
+            cq.corners = cornerClouds;
+            cq.lidar = Classification::NONE;
+
+            int waters = 0;
+            int others = 0;
+
+            pcln heightSum = 0;
+            int heightNum = 0;
+
+            for (int iz = 0; iz < sz; iz++) {
+                for (int ix = 0; ix < sx; ix++) {
+                    getCoordsFromBlock(bounds_tl, ix, 0, iz, query_block_center);
+                    cq.x = query_block_center.x();
+                    cq.y = query_block_center.y();
+                    MapCloud* mc;
+                    int mapX, mapY;
+                    Classification classification = MapCloud::getSpecializedClassification(cq, &mc, &mapX, &mapY);
+                    if (mc) {
+                        pcln height = mc->getPointHeight(mapX, mapY);
+
+                        /* Per-column heights
+                        int dummy;
+                        int blockHeight;
+                        query_block_center.z() = height;
+                        getBlockFromCoords(bounds_tl, query_block_center, dummy, blockHeight, dummy);
+                        extendColumn(ix, blockHeight, iz, sx, columns.data(), &minHeight, &maxHeight);
+                        */
+
+                        heightSum += height;
+                        heightNum++;
+                    }
+                    if (classification == Classification::WATER) {
+                        waters++;
+                    } else {
+                        others++;
+                    }
+                }
+            }
+
+            if (waters > others) {
+                /* Per-column heights
+                minHeight = maxHeight - (int)waterMaxDepth - 1;
+                for (int iy = 0; iy <= sy-1; iy++) {
+                    for (int iz = 0; iz < sz; iz++) {
+                        for (int ix = 0; ix < sx; ix++) {
+                            Classification classification;
+                            if (iy == minHeight) {
+                                classification = Classification::VEGETATION_LOW;
+                            } else {
+                                int col = columns[getColumnIndex(ix, iz, sx)];
+                                classification = iy <= col ? Classification::BUILDING_ROOF_TILED_ORANGE : Classification::NONE;
+                            }
+                            int index = getBlockIndex(ix, iy, iz, sx, sxz);
+                            blocks[index] = iy <= col ? BLOCK_SAND : BLOCK_AIR;//classificationToBlock(classification);
+                        }
+                    }
+                }
+
+                minHeight = 0;
+                maxHeight = sy - 1;
+                */
+
+                //*
+                pcln heightAvg = heightSum / heightNum;
+                int dummy;
+                int waterHeight;
+                query_block_center.z() = std::round(heightAvg);
+                getBlockFromCoords(bounds_tl, query_block_center, dummy, waterHeight, dummy);
+
+                maxHeight = waterHeight;
+                minHeight = maxHeight - (int)waterMaxDepth - 1;
+
+                maxHeight = std::min((int)sy - 1, std::max(0, maxHeight));
+                minHeight = std::min((int)sy - 1, std::max(0, minHeight));
+
+                int height = std::min(maxHeight, std::max(minHeight, waterHeight));
+                
+                for (int iy = minHeight; iy <= maxHeight; iy++) {
+                    int bid = iy == minHeight ?
+                        classificationToBlock(Classification::GROUND) :
+                        classificationToBlock(Classification::WATER);
+
+                    for (int iz = 0; iz < sz; iz++) {
+                        for (int ix = 0; ix < sx; ix++) {
+                            int index = getBlockIndex(ix, iy, iz, sx, sxz);
+                            blocks[index] = bid;
+                            extendColumn(ix, iy, iz, sx, columns.data(), &minHeight, &maxHeight);
+                        }
+                    }
+
+                }
+                //*/
+            }
+        }
+    }
+
+    {
+        //               //
+        // Box shrinking //
+        //               //
+        dtimer("box shrink");
+
+        if (shrink && maxHeight > -1) {
+            // Add some buffer on top and bottom
+            const int padTop = 1;
+            const int padBottom = 1 + (int)waterMaxDepth;
+            rsy = maxHeight - minHeight + padTop + padBottom;
+            ry = minHeight - padBottom;
+            if (ry < 0) {
+                rsy += ry;
+                ry = 0;
+            }
+
+            // Shrink box to required height
+            if (rsy < sy) {
+                int reqFrom = getBlockIndex(0, ry, 0, sx, sxz);
+                int reqTo = getBlockIndex(0, ry + rsy, 0, sx, sxz);
+                blocks.erase(blocks.begin() + reqTo, blocks.end());
+                blocks.erase(blocks.begin(), blocks.begin() + reqFrom);
+                sy = rsy;
+                y += ry;
+                sxyz = sxz*sy;
+
+                getBounds(origin, x, y, z, sx, sy, sz, bounds_tl, bounds_br, bounds_min, bounds_max);
+                getBlockFromCoords(bounds_tl, Vec(0, 0, seaThreshold), seaDummy, seaY, seaDummy);
+
+                shrunk = true;
+            }
+        }
+    }
+
+    if (pointsUsed == 0 && maxHeight == -1) {
+        blocks.resize(0);
+    }
 
     /*
     for (size_t i = 0; i < all.getPointNum(); i++) {
@@ -2563,7 +2869,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     //*/
 
     // Process points if any found
-    if (num > 0) {
+    if (pointsUsed > 0) {
 
         /*
         {
@@ -3107,7 +3413,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
                             { -1,  1 }, {  0,  1 }, {  1,  1 }
                         };
 
-                        int maxDist = 20;
+                        int maxDist = (int)waterMaxDepth;
 
                         int shoreDist;
                         for (shoreDist = 0; shoreDist < maxDist; shoreDist++) {
@@ -3177,35 +3483,54 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, const long
     maxHeight++;
 
     // For an empty box, report as such
-    if (count == 0) maxHeight = -2;
+    if (maxHeight == 0) maxHeight = -2;
 
     //plog("num %lld ", num);
 
     {
         dtimer("serialization");
 
+        const int size_int = 4;
+
+        //*
         amf::Serializer serializer;
         serializer << amf::AmfVector<unsigned int>(blocks);
         serializer << amf::AmfVector<unsigned int>(columns);
 
         amf::v8 arrays = serializer.data();
 
-        if (!br.data) br.data = new amf::v8();
-        amf::v8 *data = br.data;
+        size_t dataSize = 6 * size_int + arrays.size() + 1 * size_int;
+        //*/
 
-        const int size_int = 4;
-        size_t dataSize = 4 * size_int + arrays.size() + 1 * size_int;
-        data->resize(dataSize);
-        vassert(data->size() == dataSize, "%d %d", (int)data->size(), (int)dataSize);
+        /* Compress into length + ints
+        size_t dataSize =
+            6 * size_int + 
+            (1 + blocks.size() + 1 + columns.size())*size_int + 
+            1 * size_int;
+        //*/
 
-        amf::u8 *p = data->data();
+        void *data = br.getBuffer(dataSize);
+        vassert(br.dataSize == dataSize, "%d %d", (int)br.dataSize, (int)dataSize);
+        amf::u8 *p = static_cast<amf::u8*>(data);
+
         writeUInt(p, worldHash); p += size_int;
+        writeInt(p, ry); p += size_int;
+        writeInt(p, rsy); p += size_int;
         writeInt(p, bx); p += size_int;
         writeInt(p, by); p += size_int;
         writeInt(p, bz); p += size_int;
         memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
+        // Compress into length + ints
+        //p = writeUIntVector(p, blocks);
+        //p = writeUIntVector(p, columns);
         writeInt(p, maxHeight); p += size_int;
 
+        bool compress = maxHeight >= 0;
+
+        if (!compress) br.removeCompressed();
+        br.compression = BoxCompression::None;
+        if (compress) br.compress();
+        br.removeRedundant();
         br.valid = true;
     }
 
@@ -3427,12 +3752,20 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
     int sxyz = sx*sy*sz;
     int sxz = sx*sz;
 
+    //*
     std::vector<unsigned int>* blocks = nullptr;
     std::vector<unsigned int>* columns = nullptr;
-    MapCloud* cornerClouds[4];
 
     amf::AmfVector<unsigned int> amfblocks;
     amf::AmfVector<unsigned int> amfcolumns;
+    //*/
+
+    /*
+    std::vector<unsigned int> blocks;
+    std::vector<unsigned int> columns;
+    */
+
+    MapCloud* cornerClouds[4];
 
     // Load source data
     switch (type)
@@ -3466,33 +3799,55 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
         BoxResult &br = getBox(0, default_origin, x, y, z, sx, sy, sz, true);
 
-        amf::Deserializer deserializer;
+        br.decompress();
+
         const int size_int = 4;
         uint32_t worldHash;
         int bx, by, bz, maxHeight;
+        int ry, rsy;
 
-        auto it = br.data->cbegin();
+        // This is stupid, but I don't know how else to make the stupid
+        // iterators work with the deserializer below
+        amf::v8 data(static_cast<amf::u8*>(br.data), static_cast<amf::u8*>(br.data) + br.dataSize);
 
-        size_t datasize = br.data->size();
+        auto it = data.cbegin();
+        auto end = it + br.dataSize;
+
+        size_t datasize = br.dataSize;
 
         worldHash = readUInt(&*it); std::advance(it, size_int);
+        ry = readInt(&*it); std::advance(it, size_int);
+        rsy = readInt(&*it); std::advance(it, size_int);
         bx = readInt(&*it); std::advance(it, size_int);
         by = readInt(&*it); std::advance(it, size_int);
         bz = readInt(&*it); std::advance(it, size_int);
 
-        auto blocks_end = it;
-        std::advance(blocks_end, sxyz*size_int);
-        size_t size = std::distance(it, blocks_end);
-        size_t vsize = br.data->size();
-        size_t toend = std::distance(it, br.data->cend());
-        size_t tsize = static_cast<size_t>(blocks_end - it);
-        amfblocks = deserializer.deserialize(it, br.data->cend()).as<amf::AmfVector<unsigned int>>();
-        amfcolumns = deserializer.deserialize(it, br.data->cend()).as<amf::AmfVector<unsigned int>>();
+        if (ry != -1) {
+            sy = rsy;
+            sxyz = sxz*sy;
+        }
+
+        //auto blocks_end = it;
+        //std::advance(blocks_end, sxyz*size_int);
+        //size_t size = std::distance(it, blocks_end);
+        //size_t vsize = br.data->size();
+        //size_t toend = std::distance(it, br.data->cend());
+        //size_t tsize = static_cast<size_t>(blocks_end - it);
+        
+        //*
+        amf::Deserializer deserializer;
+        amfblocks = deserializer.deserialize(it, end).as<amf::AmfVector<unsigned int>>();
+        amfcolumns = deserializer.deserialize(it, end).as<amf::AmfVector<unsigned int>>();
+        blocks = &amfblocks.values;
+        columns = &amfcolumns.values;
+        //*/
+
+        //readUIntVector(&*it, blocks); std::advance(it, (1 + blocks.size())*size_int);
+        //readUIntVector(&*it, columns); std::advance(it, (1 + columns.size())*size_int);
 
         maxHeight = readInt(&*it); std::advance(it, size_int);
 
-        blocks = &amfblocks.values;
-        columns = &amfcolumns.values;
+        br.removeRedundant();
 
         br.mutex.unlock();
 
