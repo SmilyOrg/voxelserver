@@ -98,9 +98,9 @@ static const char* defaultPath = ".";
 
 static const char* webRel = "www/";
 static const char* fishnetRel = "fishnet/LIDAR_FISHNET_D96.dbf";
-static const char* gkotRel = "laz/gkot/";
-static const char* dof84Rel = "dof84/";
-static const char* bdmrRel = "bdmr/";
+static const char* gkotRel = "laz/gkot";
+static const char* dof84Rel = "dof84";
+static const char* bdmrRel = "bdmr";
 
 static const char* gkotFormat = "{0}/D96TM/TM_{1}.laz";
 static const char* dof84Format = "{0}/{1}.png";
@@ -120,6 +120,8 @@ static std::string dof84FullFormat;
 static std::string bdmrFullFormat;
 static std::string webPath;
 static std::string fishnetPath;
+
+
 
 // Ljubljana
 //Vec default_origin{ 462000, 101000, 200 };
@@ -537,6 +539,17 @@ static inline std::string &trim(std::string &s) {
     return ltrim(rtrim(s));
 }
 
+static void slashToBackslash(char *str) {
+    size_t len = strlen(str);
+    for (size_t i = 0; i < len; i++) {
+        char &c = str[i];
+        if (c == '/') c = '\\';
+    }
+}
+
+static void normalizeSlashes(char *str) {
+    slashToBackslash(str);
+}
 
 class RuntimeCounter;
 
@@ -1205,6 +1218,9 @@ public:
 
 class PointCloudIO
 {
+    static const int retryNum = 6;
+    static const int retryInitialSleepMs = 10;
+
     std::mutex mutex;
     LASreader *reader;
     bool missing;
@@ -1232,11 +1248,21 @@ public:
     
     void open(const char *path)
     {
-        LASreadOpener opener = LASreadOpener();
-        opener.set_file_name(path);
-        reader = opener.open();
+        int retrySleepMs = retryInitialSleepMs;
+        for (int retries = 0; retries < retryNum && !reader; retries++) {
+            if (retries > 0) {
+                Sleep(retrySleepMs);
+                retrySleepMs *= 2;
+            }
+            LASreadOpener opener = LASreadOpener();
+            opener.set_file_name(path);
+            reader = opener.open();
+            if (!reader) {
+                plog("Unable to open %s, retrying %d more times after %dms", path, retryNum - 1 - retries, retrySleepMs);
+            }
+        }
 
-        if (!reader) plog("Unable to open %s", path);
+        if (!reader) plog("Unable to open %s after %d retries", path, retryNum);
     }
 
     void close()
@@ -1417,7 +1443,6 @@ public:
         {
             dtimer("mapcloud readers");
             for (int i = 0; i < READER_NUM; i++) {
-                readers[i].open(lidarPath.c_str());
                 readerFree[i] = true;
             }
         }
@@ -1493,7 +1518,9 @@ public:
             readersFree--;
         }
 
+        reader->open(lidarPath.c_str());
         reader->load(all, ground, min_x, min_y, max_x, max_y);
+        reader->close();
 
         {
             std::unique_lock<std::mutex> lock(mutex);
@@ -1751,13 +1778,18 @@ MapCloud* getMapCloud(int lat, int lon)
 {
     std::lock_guard<std::mutex> lock(mapCloudListMutex);
     
+    int index = 0;
     for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
         if ((*element)->lat == lat && (*element)->lon == lon) {
+            //plog("map cloud %4d %4d: found", lat, lon);
             return *element;
         }
+        index++;
     }
 
     // Not found, create a new one
+
+    //plog("map cloud %4d %4d: new", lat, lon);
 
     //plog("Initializing new map cloud at %d, %d", lat, lon);
 
@@ -1769,6 +1801,10 @@ MapCloud* getMapCloud(int lat, int lon)
     std::string gkotPath = fmt::format(gkotFullFormat, block, name);
     std::string dof84Path = fmt::format(dof84FullFormat, block, name);
     std::string bdmrPath = fmt::format(bdmrFullFormat, block, name);
+
+    normalizeSlashes(const_cast<char*>(gkotPath.c_str()));
+    normalizeSlashes(const_cast<char*>(dof84Path.c_str()));
+    normalizeSlashes(const_cast<char*>(bdmrPath.c_str()));
 
     MapCloud *mc = new MapCloud(lat, lon, gkotPath, dof84Path, bdmrPath);
     mapCloudList.push_front(mc);
