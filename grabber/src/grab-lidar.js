@@ -12,16 +12,48 @@ var workerFarm = require('worker-farm');
 var printf = require('printf');
 
 var ranges = [
-    // {
-    //     name: "Ljubljana1",
-    //     min: { x: 462000.00, y: 101000.00 },
-    //     max: { x: 463000.00, y: 102000.00 },
-    // },
-    // {
-    //     name: "Ljubljana9",
-    //     min: { x: 462000.00, y: 101000.00 },
-    //     max: { x: 465000.00, y: 104000.00 },
-    // },
+/*
+    {
+        name: "Slovenija",
+        min: { x: 353523.96, y: 12976.04 },
+        max: { x: 641258.33, y: 207841.67 },
+    },
+// */
+/*
+    {
+        name: "Prva rezina",
+        min: { x: 363578.13, y: 16547.92 },
+        max: { x: 438719.79, y: 211545.83 },
+    },
+    {
+        name: "Druga rezina",
+        min: { x: 427078.13, y: 16547.92 },
+        max: { x: 510686.46, y: 211545.83 },
+    },
+    {
+        name: "Tretja rezina",
+        min: { x: 510686.46, y: 16547.92 },
+        max: { x: 563073.96, y: 211545.83 },
+    },
+    {
+        name: "Četrta rezina",
+        min: { x: 563073.96, y: 107829.17 },
+        max: { x: 633453.13, y: 202285.42 },
+    },
+//*/
+/*
+    {
+        name: "Ljubljana1",
+        min: { x: 462000.00, y: 101000.00 },
+        max: { x: 463000.00, y: 102000.00 },
+    },
+    {
+        name: "Ljubljana9",
+        min: { x: 462000.00, y: 101000.00 },
+        max: { x: 465000.00, y: 104000.00 },
+    },
+//*/
+//*
     {
         name: "Ljubljana",
         min: { x: 457262.46, y: 96189.57 },
@@ -72,6 +104,7 @@ var ranges = [
         min: { x: 539405.46, y: 149183.21 },
         max: { x: 560386.91, y: 164317.38 },
     }
+//*/
 ];
 
 var found = [];
@@ -100,11 +133,11 @@ var downloadQueue = queue(
 );
 var liberatorQueue = queue(
     processResourceWithFunction.bind(null, liberateFile),
-    6, "liberation", "liberating", "liberated"
+    16, "liberation", "liberating", "liberated"
 );
 var dmrQueue = queue(
     processDMRFile,
-    12, "dmr compression", "dmr compressing", "dmr compressed"
+    16, "dmr compression", "dmr compressing", "dmr compressed"
 );
 
 // http://gis.arso.gov.si/lidar/gkot/b_35/D96TM/TM_462_101.zlas
@@ -116,6 +149,7 @@ var lidarRemote = "http://gis.arso.gov.si/";
 var lidarLocal = "W:/gis/arso/";
 var lidarLocalMass = "D:/gis/arso/";
 var liberator = lidarLocal + "lasliberate/bin/lasliberate.exe";
+var fishnetDatabase = lidarLocal + "fishnet/LIDAR_FISHNET_D96.dbf";
 
 var configs = [
     {
@@ -149,7 +183,8 @@ var configs = [
         drain:
             lidarLocal +
             "bdmr/{{record.BLOK}}/D96TM/TM1_{{record.NAME}}.bin",
-        queue: dmrQueue
+        queue: dmrQueue,
+        deleteSource: true
     },
     {
         name: "map",
@@ -175,9 +210,7 @@ var total = 0;
 var bdmrWorkers = workerFarm(require.resolve('./bdmr'));
 var dbfParsed = false;
 
-parseDatabase(lidarLocal + "fishnet/LIDAR_FISHNET_D96.dbf");
-
-
+parseDatabase(fishnetDatabase);
 
 function parseDatabase(file) {
     var dbfParser = new DBFParser(file);
@@ -228,7 +261,7 @@ function getTotalQueueLength() {
 function plog(resource) {
 
     var qlens = queues.reduce(function(a, b) {
-        return a + printf("%4d", b.length());
+        return a + printf("%6d", b.length());
     }, "");
 
     console.log(printf("%s %12s %5s %16s  %s",
@@ -252,7 +285,7 @@ function initRecord(record, done) {
             config: config
         });
     }, this);
-    done();
+    process.nextTick(done);
 }
 
 function initResource(resource, done) {
@@ -263,7 +296,7 @@ function initResource(resource, done) {
     var nameSpl = resource.record.NAME.split("_", 2);
     if (nameSpl.length != 2) {
         console.error("Unable to split name to coordinates: " + nameSpl);
-        done();
+        process.nextTick(done);
         return;
     }
 
@@ -290,7 +323,7 @@ function initResource(resource, done) {
     resource.name = path.basename(resource.drain);
     if (existingDrains.indexOf(resource.drain) != -1) {
         duplicated++;
-        done();
+        process.nextTick(done);
         return;
     }
     existingDrains.push(resource.drain);
@@ -300,7 +333,7 @@ function initResource(resource, done) {
     if (fileExists(resource.drain)) {
         resource.source = "";
         finishResourceQueue.push(resource);
-        done();
+        process.nextTick(done);
     } else {
         mkdirp(path.dirname(resource.drain), function(err) {
             if (err) throw new Error(err);
@@ -338,7 +371,7 @@ function processResource(resource, done) {
         plog(resource, "unable to source");
     }
 
-    done();
+    process.nextTick(done);
 }
 
 function finishResource(resource, done) {
@@ -368,14 +401,14 @@ function finishResource(resource, done) {
         workerFarm.end(bdmrWorkers);
     }
 
-    done();
+    process.nextTick(done);
 }
 
 function processResourceWithFunction(func, resource, done) {
     plog(resource, resource.config.queue.verbing);
     func(resource.source, resource.drain, function onFinish(err) {
         if (err) {
-            plog(resource, resource.config.queue.noun + " error: " + error);
+            plog(resource, resource.config.queue.noun + " error: " + err);
         } else {
             finishResourceQueue.push(resource);
         }
@@ -415,7 +448,8 @@ function liberateFile(zlas, drain, done) {
     var indexTemp = path.join(dir, prefix + indexExt);
     
     var cmd = liberator + " " + zlas + " " + drainTemp;
-    exec(path.normalize(cmd), function(error, stdout, stderr) {
+
+    exec(cmd, function(error, stdout, stderr) {
         if (error) {
             console.error("Liberation error: " + stderr);
             if (fileExists(drainTemp)) fs.unlink(drainTemp);

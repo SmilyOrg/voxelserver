@@ -26,7 +26,7 @@ module.exports = function (input, callback) {
                 readStream.destroy();
                 parser.resume();
                 callback(null, {
-                    err: "Invalid DMR grid: " + x + ", " + y
+                    err: source + " has invalid DMR grid: " + x + ", " + y
                 });
                 return;
             }
