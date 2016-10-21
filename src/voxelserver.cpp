@@ -18,6 +18,7 @@
 #include <cctype>
 #include <locale>
 #include <random>
+#include <condition_variable>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -89,7 +90,9 @@ typedef double pcln;
 typedef Eigen::Vector3d Vec;
 
 //static const int defaultPower = 11;
-static const int defaultPower = 15;
+static const int defaultPower = 14;
+static const int defaultMapMemoryLimit = 1000;
+static int mapMemoryLimit;
 
 static const char* nameFormat = "{0}_{1}";
 
@@ -120,7 +123,6 @@ static std::string dof84FullFormat;
 static std::string bdmrFullFormat;
 static std::string webPath;
 static std::string fishnetPath;
-
 
 
 // Ljubljana
@@ -580,7 +582,7 @@ enum RuntimeCounterUnit {
 
 class Timer;
 
-typedef unsigned long long Count;
+typedef long long Count;
 class RuntimeCounter {
     std::atomic<Count> count;
 
@@ -597,13 +599,13 @@ public:
         runtimeCounters.add(this);
     }
 
-    Count operator++() { return ++count; }
-    Count operator--() { return --count; }
-    Count operator+=(Count c) { return count += c; }
-    Count operator-=(Count c) { return count -= c; }
+    RuntimeCounter& operator++() { ++count; return *this; }
+    RuntimeCounter& operator--() { --count; return *this; }
+    RuntimeCounter& operator+=(Count c) { count += c; return *this; }
+    RuntimeCounter& operator-=(Count c) { count -= c; return *this; }
 
-    Count reset() {
-        Count c = count;
+    Count load() {
+        Count c = count.load();
         if (type != STATP) count = 0;
         return c;
     }
@@ -636,7 +638,7 @@ ujson::value to_json(RuntimeCounters const &rcs) {
                 { "unit", iter->unit },
                 { "id", iter->id },
                 { "name", iter->name },
-                { "value", static_cast<double>(iter->reset()) }
+                { "value", static_cast<double>(iter->load()) }
             }
         );
     }
@@ -651,6 +653,8 @@ ADD_COUNTER(requestsServed, "Requests served");
 ADD_COUNTER(boxesCached, "Boxes cached", RuntimeCounterType::STATP);
 ADD_COUNTER(boxCacheBytes, "Box cache memory", RuntimeCounterType::STATP, RuntimeCounterUnit::BYTES);
 ADD_COUNTER(mapOrthoBytes, "Map ortho memory", RuntimeCounterType::STATP, RuntimeCounterUnit::BYTES);
+ADD_COUNTER(mapCloudsInUse, "Map clouds in use", RuntimeCounterType::STATP);
+ADD_COUNTER(mapCloudsLoaded, "Map clouds loaded", RuntimeCounterType::STATP);
 
 
 
@@ -1054,62 +1058,7 @@ const amf::u8* readUIntVector(const amf::u8 *p, std::vector<unsigned int> &vec)
 }
 
 
-class Fishnet
-{
 
-    DBF dbf;
-
-    int records;
-    int fields;
-
-    std::map<std::string, std::string> nameToBlock;
-
-    int getFieldIndexFromName(const char *name) {
-        for (int i = 0; i < fields; i++)
-        {
-            if (dbf.GetFieldName(i) == name) return i;
-        }
-        return -1;
-    }
-
-public:
-    const std::string blockNotAvailable;
-
-    Fishnet() : blockNotAvailable("b_NA") {}
-
-    bool load(const char *path) {
-        int ret = dbf.open(path);
-        if (ret) {
-            return false;
-        }
-        
-        records = dbf.GetNumRecords();
-        fields = dbf.GetNumFields();
-
-        int colName = getFieldIndexFromName("NAME"); vassert(colName > -1, "Column not found: NAME");
-        int colBlock = getFieldIndexFromName("BLOK"); vassert(colBlock > -1, "Column not found: BLOK");
-        
-        for (int i = 0; i < records; i++) {
-            dbf.loadRec(i);
-            std::string name = dbf.readField(colName); rtrim(name);
-            std::string block = dbf.readField(colBlock); rtrim(block);
-            nameToBlock.insert(std::make_pair(name, block));
-        }
-
-        dbf.close();
-
-        return true;
-    }
-
-    const std::string& getBlockFromName(std::string name) {
-        auto it = nameToBlock.find(name);
-        if (it == nameToBlock.end()) return blockNotAvailable;
-        return it->second;
-    }
-
-};
-
-Fishnet fishnet;
 
 
 struct Point
@@ -1395,18 +1344,22 @@ public:
 
 };
 
-#include <condition_variable>
+static const long boxHashAccessStart = 0xFF;
+static std::atomic<long> boxHashAccess = { boxHashAccessStart };
+static const long long mapCloudAccessStart = 0xFF;
+static std::atomic<long long> mapCloudAccess = { mapCloudAccessStart };
 
 class MapCloud;
+struct MapCloudRef;
 
 struct ClassificationQuery {
     double x;
     double y;
-    MapCloud** corners;
+    MapCloud* corners[4];
     Classification lidar;
     int flags;
 
-    ClassificationQuery() : x(NAN), y(NAN), corners(nullptr), lidar(Classification::NONE), flags(ClassificationFlags::DEFAULT) {}
+    ClassificationQuery() : x(NAN), y(NAN), lidar(Classification::NONE), flags(ClassificationFlags::DEFAULT) {}
 };
 
 class MapCloud {
@@ -1419,7 +1372,6 @@ public:
     PointCloudIO readers[READER_NUM];
     int readersFree = READER_NUM;
 
-    MapImage map;
     int32_t* bdmrMap;
     size_t bdmrSize;
 
@@ -1429,6 +1381,12 @@ protected:
 
     std::mutex mutex;
     std::condition_variable cond;
+
+    std::atomic<long long> access;
+    std::atomic<int> references;
+
+    MapImage map;
+
 public:
 
     MapCloud(int lat, int lon, std::string lidarPath, std::string mapPath, std::string bdmrPath) :
@@ -1436,8 +1394,11 @@ public:
         lidarPath(lidarPath),
         mapPath(mapPath),
         bdmrMap(nullptr),
-        bdmrSize(0)
+        bdmrSize(0),
+        references(0)
     {
+        ++mapCloudsLoaded;
+
         plogScope();
 
         {
@@ -1464,7 +1425,7 @@ public:
         }
 
         {
-            dtimer("bdmr map");
+            dtimer("mapcloud bdmr map");
             size_t length;
             char* mapped = map_file(bdmrPath.c_str(), &length);
             if (mapped == nullptr) {
@@ -1484,6 +1445,8 @@ public:
     }
 
     ~MapCloud() {
+        --mapCloudsLoaded;
+
         for (int i = 0; i < READER_NUM; i++) {
             readerFree[i] = false;
             readers[i].close();
@@ -1491,6 +1454,7 @@ public:
 
         if (map.data) {
             stbi_image_free(map.data);
+            mapOrthoBytes -= map.size;
             map.data = nullptr;
         }
 
@@ -1498,6 +1462,28 @@ public:
             unmap_file(reinterpret_cast<char*>(bdmrMap), bdmrSize);
             bdmrMap = nullptr;
         }
+    }
+
+    int getRefNum() {
+        return references;
+    }
+
+    long long getAccessTime() {
+        return access;
+    }
+
+    void acquire() {
+        std::unique_lock<std::mutex> lock(mutex);
+        ++mapCloudsInUse;
+        ++references;
+        access = mapCloudAccess++;
+    }
+
+    void release() {
+        std::unique_lock<std::mutex> lock(mutex);
+        --mapCloudsInUse;
+        --references;
+        access = mapCloudAccess++;
     }
 
     void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN) {
@@ -1579,10 +1565,14 @@ public:
 
     void getMapCoords(const double x, const double y, int *mx, int *my) const {
         *mx = (int)(x - lat*mapTileWidth);
-        *my = (int)(1000 - 1 - (y - lon*mapTileHeight));
+        *my = (int)(mapTileHeight - 1 - (y - lon*mapTileHeight));
     }
 
-    static MapCloud* fromCorners(MapCloud** corners, const double x, const double y, int *mx = nullptr, int *my = nullptr) {
+    const MapImage& getMap() {
+        return map;
+    }
+
+    static MapCloud* fromCorners(MapCloud*const (&corners)[4], const double x, const double y, int *mx = nullptr, int *my = nullptr) {
         int cornerNum = 4;
         for (int i = 0; i < cornerNum; i++) {
             MapCloud* mapCloud = corners[i];
@@ -1598,7 +1588,7 @@ public:
         return nullptr;
     }
 
-    static unsigned int getMapColor(MapCloud** corners, const double x, const double y) {
+    static unsigned int getMapColor(MapCloud* (&corners)[4], const double x, const double y) {
         int mx;
         int my;
         MapCloud *mapCloud = fromCorners(corners, x, y, &mx, &my);
@@ -1620,7 +1610,7 @@ public:
         return (md[mapIndex + 0] << 16) | (md[mapIndex + 1] << 8) | md[mapIndex + 2];
     }
 
-    static pcln getHeight(MapCloud** corners, const double x, const double y) {
+    static pcln getHeight(MapCloud* (&corners)[4], const double x, const double y) {
         int mx;
         int my;
         MapCloud *mapCloud = fromCorners(corners, x, y, &mx, &my);
@@ -1774,42 +1764,66 @@ public:
     }
 };
 
-MapCloud* getMapCloud(int lat, int lon)
-{
-    std::lock_guard<std::mutex> lock(mapCloudListMutex);
-    
-    int index = 0;
-    for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
-        if ((*element)->lat == lat && (*element)->lon == lon) {
-            //plog("map cloud %4d %4d: found", lat, lon);
-            return *element;
-        }
-        index++;
+struct MapCloudRef {
+    MapCloud* cloud;
+
+    MapCloudRef(MapCloud* cloud = nullptr) : cloud(cloud) {
+        if (cloud) cloud->acquire();
     }
 
-    // Not found, create a new one
+    MapCloudRef(const MapCloudRef &ref) {
+        cloud = ref.cloud;
+        if (cloud) cloud->acquire();
+    }
 
-    //plog("map cloud %4d %4d: new", lat, lon);
+    MapCloudRef& operator=(const MapCloudRef& ref) {
+        if (cloud) cloud->release();
+        cloud = ref.cloud;
+        if (cloud) cloud->acquire();
+        return *this;
+    }
 
-    //plog("Initializing new map cloud at %d, %d", lat, lon);
+    ~MapCloudRef() {
+        if (cloud) cloud->release();
+    }
+};
 
-    std::string name = fmt::format(nameFormat, lat, lon);
-    std::string block = fishnet.getBlockFromName(name);
+static void trimMapCloudList()
+{
+    std::lock_guard<std::mutex> listLock(mapCloudListMutex);
 
-    if (block == fishnet.blockNotAvailable) return nullptr;
+    dtimer("mapcloud trim");
 
-    std::string gkotPath = fmt::format(gkotFullFormat, block, name);
-    std::string dof84Path = fmt::format(dof84FullFormat, block, name);
-    std::string bdmrPath = fmt::format(bdmrFullFormat, block, name);
+    int sleepMin = 50;
+    int sleepMax = 2000;
+    int sleepMs = sleepMin;
 
-    normalizeSlashes(const_cast<char*>(gkotPath.c_str()));
-    normalizeSlashes(const_cast<char*>(dof84Path.c_str()));
-    normalizeSlashes(const_cast<char*>(bdmrPath.c_str()));
+    long long mapMemoryLimitBytes = mapMemoryLimit * 1000000L;
 
-    MapCloud *mc = new MapCloud(lat, lon, gkotPath, dof84Path, bdmrPath);
-    mapCloudList.push_front(mc);
-
-    return mc;
+    while (mapOrthoBytes.load() > mapMemoryLimitBytes) {
+        MapCloud* lru = nullptr;
+        long long minAccessTime = MAXLONGLONG;
+        for (auto i = mapCloudList.begin(); i != mapCloudList.end(); i++) {
+            MapCloud* mc = *i;
+            if (mc->getRefNum() > 0) continue;
+            long long access = mc->getAccessTime();
+            if (access < minAccessTime) {
+                minAccessTime = access;
+                lru = mc;
+            }
+        }
+        if (lru == nullptr) {
+            if (sleepMs < sleepMax) sleepMs *= 2;
+            if (sleepMs > sleepMax) sleepMs = sleepMax;
+            plog("Waiting to free map cloud in %dms...", sleepMs);
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        }
+        else {
+            sleepMs = sleepMin;
+            mapCloudList.remove(lru);
+            delete lru;
+        }
+    }
 }
 
 static unsigned int classificationToBlock(unsigned int cv)
@@ -2093,10 +2107,10 @@ public:
 
 };
 
-static const long boxHashAccessStart = 0xFF;
-static std::atomic<long> boxHashAccess = { boxHashAccessStart };
+
 static SpatialHash<BoxResult> boxHash;
 static BoxResult invalidBoxResult;
+
 
 static const int blockImage[9] = {
     0xFF, 0xFF, 0xFF,
@@ -2235,22 +2249,108 @@ void sendLiveJSONHeader(struct mg_connection *conn, size_t size)
         "\r\n", size);
 }
 
-static inline int getBlockIndex(int bx, int by, int bz, int sx, int sxz)
-{
-    return bx + bz*sx + by*sxz;
-}
 
-static inline void getIndexBlock(int index, int &bx, int &by, int &bz, int sx, int sz)
-{
-    bx = index % sx;
-    bz = (index / sx) % sz;
-    by = index / (sx*sz);
-}
 
-static inline int getColumnIndex(int bx, int bz, int sx)
+
+static void paintMapCloud(MapImage &raw, int lat, int lon, unsigned int color, int tileSize = 1);
+static void renderMapCloudsRaw(MapImage &raw);
+static void renderMapClouds(MapImage &img);
+
+
+class Fishnet
 {
-    return bx + bz*sx;
-}
+
+    DBF dbf;
+
+    int records;
+    int fields;
+
+    std::map<std::string, std::string> nameToBlock;
+
+    MapImage clouds;
+
+    int getFieldIndexFromName(const char *name) {
+        for (int i = 0; i < fields; i++)
+        {
+            if (dbf.GetFieldName(i) == name) return i;
+        }
+        return -1;
+    }
+
+public:
+    const std::string blockNotAvailable;
+    double minX, minY, maxX, maxY;
+
+    Fishnet() : blockNotAvailable("b_NA") {}
+
+    bool paintMapClouds(MapImage &raw) {
+        if (!clouds.data) return false;
+        memcpy(raw.data, clouds.data, clouds.size);
+        return true;
+    }
+
+    bool load(const char *path) {
+        int ret = dbf.open(path);
+        if (ret) {
+            return false;
+        }
+
+        records = dbf.GetNumRecords();
+        fields = dbf.GetNumFields();
+
+        int colName = getFieldIndexFromName("NAME"); vassert(colName > -1, "Column not found: NAME");
+        int colBlock = getFieldIndexFromName("BLOK"); vassert(colBlock > -1, "Column not found: BLOK");
+        int colCenterX = getFieldIndexFromName("CENTERX"); vassert(colCenterX > -1, "Column not found: CENTERX");
+        int colCenterY = getFieldIndexFromName("CENTERY"); vassert(colCenterY > -1, "Column not found: CENTERY");
+
+        minX = INFINITY, maxX = -INFINITY;
+        minY = INFINITY, maxY = -INFINITY;
+
+        std::vector<std::pair<double, double>> coords;
+        coords.resize(records);
+        for (int i = 0; i < records; i++) {
+            dbf.loadRec(i);
+            std::string name = dbf.readField(colName); rtrim(name);
+            std::string block = dbf.readField(colBlock); rtrim(block);
+            std::string scenterX = dbf.readField(colCenterX); trim(scenterX);
+            std::string scenterY = dbf.readField(colCenterY); trim(scenterY);
+            double centerX = std::stod(scenterX);
+            double centerY = std::stod(scenterY);
+            minX = std::min(minX, centerX); maxX = std::max(maxX, centerX);
+            minY = std::min(minY, centerY); maxY = std::max(maxY, centerY);
+            nameToBlock.insert(std::make_pair(name, block));
+            coords[i] = { centerX, centerY };
+        }
+
+        dbf.close();
+
+        minX -= mapTileWidth / 2; maxX += mapTileWidth / 2;
+        minY -= mapTileWidth / 2; maxY += mapTileHeight / 2;
+
+        clouds.data = nullptr;
+        renderMapCloudsRaw(clouds);
+        paintRect(static_cast<unsigned int*>(clouds.data), clouds.width, 0, 0, 0x33000000, clouds.width, clouds.height);
+        for (int i = 0; i < records; i++) {
+            auto &pair = coords[i];
+            paintMapCloud(clouds, pair.first / mapTileWidth, pair.second / mapTileHeight, 0xFFFFFFFF);
+        }
+
+        return true;
+    }
+
+    const std::string& getBlockFromName(std::string name) {
+        auto it = nameToBlock.find(name);
+        if (it == nameToBlock.end()) return blockNotAvailable;
+        return it->second;
+    }
+
+};
+
+Fishnet fishnet;
+
+
+
+
 
 static void renderBoxesUsed(MapImage &img)
 {
@@ -2259,10 +2359,13 @@ static void renderBoxesUsed(MapImage &img)
     int width = hashEdge;
     int height = width;
 
-    int tileSize = 10;
+    int tileSize = 1;
 
     int pixelWidth = width*tileSize;
     int pixelHeight = height*tileSize;
+
+    int offX = -width / 2;
+    int offY = -height / 2;
 
     size_t pixelsLen = pixelWidth*pixelHeight;
     std::unique_ptr<unsigned int> pixels((new unsigned int[pixelsLen]()));
@@ -2271,7 +2374,7 @@ static void renderBoxesUsed(MapImage &img)
         for (int ix = 0; ix < width; ix++) {
             //if (ix + iy*width >= len) break;
 
-            BoxResult &br = boxHash.at(ix, iy);
+            BoxResult &br = boxHash.at(ix + offX, iy + offY);
 
             char r = 0;
             char g = 0;
@@ -2289,68 +2392,154 @@ static void renderBoxesUsed(MapImage &img)
     encodeImage(&img, pixels.get(), pixelWidth, pixelHeight);
 }
 
-static void renderMapClouds(MapImage &img)
+
+
+
+static void paintMapCloud(MapImage &raw, int lat, int lon, unsigned int color, int tileSize)
 {
-    int subtileWidth = 6;
-    int subtileNum = MapCloud::READER_NUM;
-    int border = 1;
-    int tileSize = subtileWidth*subtileNum + border*2;
+    int minX = (int)floor(fishnet.minX / mapTileWidth);
+    int minY = (int)floor(fishnet.minY / mapTileHeight);
+    int ix = lat - minX;
+    int iy = lon - minY;
+    iy = raw.height/tileSize - 1 - iy;
+    ix *= tileSize;
+    iy *= tileSize;
+    if (ix < 0 || ix + tileSize >= raw.width || iy < 0 || iy + tileSize >= raw.height) return;
+    paintRect(static_cast<unsigned int*>(raw.data), raw.width,
+        ix, iy,
+        color,
+        tileSize, tileSize
+    );
+}
+
+static void renderMapCloudsRaw(MapImage &raw)
+{
+    int tileSize = 1;
     int tileGrid = 10;
 
-    int centerLat = static_cast<int>(default_origin.x()/mapTileWidth);
-    int centerLon = static_cast<int>(default_origin.y()/mapTileHeight);
+    int minX = (int)floor(fishnet.minX / mapTileWidth);
+    int minY = (int)floor(fishnet.minY / mapTileHeight);
+    int width = (int)ceil((fishnet.maxX - fishnet.minX) / mapTileWidth);
+    int height = (int)ceil((fishnet.maxY - fishnet.minY) / mapTileHeight);
 
-    int width = tileGrid;
-    int height = width;
-
-    int pixelWidth = width*tileSize;
-    int pixelHeight = height*tileSize;
+    int pixelWidth = width * tileSize;
+    int pixelHeight = height * tileSize;
 
     size_t pixelsLen = pixelWidth*pixelHeight;
-    std::unique_ptr<unsigned int> pixels((new unsigned int[pixelsLen]()));
+    raw.size = pixelsLen * 4;
+    unsigned int* pixels = static_cast<unsigned int*>(malloc(raw.size));
+
+    raw.width = pixelWidth;
+    raw.height = pixelHeight;
+    raw.data = pixels;
+
+    if (!fishnet.paintMapClouds(raw)) {
+        paintRect(pixels, pixelWidth,
+            0, 0,
+            0xFFFFFFFF,
+            pixelWidth, pixelHeight
+        );
+    }
 
     std::lock_guard<std::mutex> lock(mapCloudListMutex);
-
-    paintRect(pixels.get(), pixelWidth,
-        0, 0,
-        0xFF000000,
-        pixelWidth, pixelHeight
-    );
 
     for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
         MapCloud &mc = **element;
 
-        int ix = mc.lat - centerLat + width/2 - 1;
-        int iy = mc.lon - centerLon + height/2 - 1;
+        //int ix = mc.lat - centerLat + width/2 - 1;
+        //int iy = mc.lon - centerLon + height/2 - 1;
+
+        int ix = mc.lat - minX;
+        int iy = mc.lon - minY;
 
         if (ix < 0 || ix >= width || iy < 0 || iy >= height) break;
 
-        paintRect(pixels.get(), pixelWidth,
-            ix*tileSize, iy*tileSize,
-            0xFF555555,
-            tileSize, tileSize
-        );
+        unsigned char r = 0;
+        unsigned char g = 0;
+        unsigned char b = 0;
 
-        for (int is = 0; is < subtileNum; is++) {
-                
-            bool free = mc.readerFree[is];
-                
-            char r = free ? 0 : 0xFF;
-            char g = free ? 0xFF : 0;
-            char b = 0;
-
-            unsigned int color = ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
-
-            color |= 0xFF000000;
-            paintRect(pixels.get(), pixelWidth,
-                ix*tileSize + border + is * subtileWidth, iy*tileSize + border,
-                color,
-                subtileWidth, tileSize - border*2
-            );
+        if (mc.getRefNum() > 0) {
+            int refs = mc.getRefNum();
+            int refsMax = 6;
+            b = 0xFF;
+            g = refs > refsMax ? 0xFF : (refs * 0xFF / refsMax);
         }
+        else {
+            r = g = b = std::min(0xDD, (int)(mapCloudAccess - mc.getAccessTime() - 1));
+        }
+
+        unsigned int color = ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+        color |= 0xFF000000;
+
+        paintMapCloud(raw, mc.lat, mc.lon, color, tileSize);
+    }
+}
+
+static void renderMapClouds(MapImage &img)
+{
+    MapImage raw;
+    renderMapCloudsRaw(raw);
+    encodeImage(&img, static_cast<unsigned int*>(raw.data), raw.width, raw.height);
+}
+
+
+MapCloudRef acquireMapCloud(int lat, int lon)
+{
+
+    int index = 0;
+    for (auto element = mapCloudList.begin(); element != mapCloudList.end(); element++) {
+        if ((*element)->lat == lat && (*element)->lon == lon) {
+            //plog("map cloud %3d %3d found", lat, lon);
+            return MapCloudRef(*element);
+        }
+        index++;
     }
 
-    encodeImage(&img, pixels.get(), pixelWidth, pixelHeight);
+    // Not found, create a new one
+    std::string name = fmt::format(nameFormat, lat, lon);
+    std::string block = fishnet.getBlockFromName(name);
+
+    if (block != fishnet.blockNotAvailable) {
+        std::string gkotPath = fmt::format(gkotFullFormat, block, name);
+        std::string dof84Path = fmt::format(dof84FullFormat, block, name);
+        std::string bdmrPath = fmt::format(bdmrFullFormat, block, name);
+
+        normalizeSlashes(const_cast<char*>(gkotPath.c_str()));
+        normalizeSlashes(const_cast<char*>(dof84Path.c_str()));
+        normalizeSlashes(const_cast<char*>(bdmrPath.c_str()));
+
+        MapCloud *mc = new MapCloud(lat, lon, gkotPath, dof84Path, bdmrPath);
+        mapCloudList.push_front(mc);
+        mc->acquire();
+        trimMapCloudList();
+        mc->release();
+        //plog("map cloud %3d %3d created", lat, lon);
+        return MapCloudRef(mc);
+    }
+
+    //plog("map cloud %3d %3d not found", lat, lon);
+    return MapCloudRef(nullptr);
+}
+
+
+
+
+
+static inline int getBlockIndex(int bx, int by, int bz, int sx, int sxz)
+{
+    return bx + bz*sx + by*sxz;
+}
+
+static inline void getIndexBlock(int index, int &bx, int &by, int &bz, int sx, int sz)
+{
+    bx = index % sx;
+    bz = (index / sx) % sz;
+    by = index / (sx*sz);
+}
+
+static inline int getColumnIndex(int bx, int bz, int sx)
+{
+    return bx + bz*sx;
 }
 
 static void getBlockFromCoords(Vec reference, Vec coords, int &bx, int &by, int &bz)
@@ -2448,7 +2637,14 @@ static Classification getBlockFromCloud(Vec origin, int bx, int by, int bz, Poin
     return maxClassification;
 }
 
-static int getCornerMapClouds(MapCloud** cornerClouds, const Vec min, const Vec max) {
+static void setCornersFromRefs(const MapCloudRef(&cls)[4], MapCloud* (&corners)[4]) {
+    corners[0] = cls[0].cloud;
+    corners[1] = cls[1].cloud;
+    corners[2] = cls[2].cloud;
+    corners[3] = cls[3].cloud;
+}
+
+static int getCornerMapClouds(MapCloudRef(&cornerClouds)[4], const Vec min, const Vec max) {
     const int cornerNum = 4;
     const pcln corners[cornerNum][2] = {
         { min.x(), min.y() },{ max.x(), min.y() },
@@ -2459,8 +2655,6 @@ static int getCornerMapClouds(MapCloud** cornerClouds, const Vec min, const Vec 
     int latlon[cornerNum][3];
 
     for (int i = 0; i < cornerNum; i++) {
-
-        cornerClouds[i] = nullptr;
 
         int lat = static_cast<int>(floor(round(corners[i][0]) / mapTileWidth));
         int lon = static_cast<int>(floor(round(corners[i][1]) / mapTileHeight));
@@ -2489,8 +2683,10 @@ static int getCornerMapClouds(MapCloud** cornerClouds, const Vec min, const Vec 
         int index = latlon[i][0];
         int lat = latlon[i][1];
         int lon = latlon[i][2];
-        MapCloud *mc = getMapCloud(lat, lon);
-        cornerClouds[index] = mc;
+        //plog("map cloud %3d %3d corner %d", lat, lon, i);
+        cornerClouds[index] = acquireMapCloud(lat, lon);
+        //MapCloud *mc = getMapCloud(lat, lon);
+        //cornerClouds[index] = mc;
     }
 
     return latlonCount;
@@ -2617,7 +2813,8 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
 
         if (origin.z() == MAXLONG) {
             dtimer("height read");
-            MapCloud* mc = getMapCloud((int)(origin.x() / mapTileWidth), (int)(origin.y() / mapTileHeight));
+            MapCloudRef mcl = acquireMapCloud((int)(origin.x() / mapTileWidth), (int)(origin.y() / mapTileHeight));
+            MapCloud *mc = mcl.cloud;
             if (mc) {
                 int mx, my;
                 mc->getMapCoords(origin.x(), origin.y(), &mx, &my);
@@ -2648,7 +2845,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
     PointCloud all(50);
     PointCloud ground(20);
 
-    MapCloud* cornerClouds[4];
+    MapCloudRef cornerClouds[4];
 
     {
         //            //
@@ -2658,7 +2855,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
 
         int count = getCornerMapClouds(cornerClouds, bounds_min, bounds_max);
         for (int i = 0; i < 4; i++) {
-            MapCloud* mc = cornerClouds[i];
+            MapCloud* mc = cornerClouds[i].cloud;
             if (!mc) continue;
             mc->load(&all, &ground, bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
         }
@@ -2712,7 +2909,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
             int cornerNum = 4;
             Vec query_block_center;
             ClassificationQuery cq;
-            cq.corners = cornerClouds;
+            setCornersFromRefs(cornerClouds, cq.corners);
             cq.lidar = Classification::NONE;
 
             int waters = 0;
@@ -3225,7 +3422,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
                     getCoordsFromBlock(bounds_tl, bx, by, bz, cq_point);
                     cq.x = cq_point.x;
                     cq.y = cq_point.y;
-                    cq.corners = cornerClouds;
+                    setCornersFromRefs(cornerClouds, cq.corners);
                     cq.lidar = static_cast<Classification>(c);
                     MapCloud *mapCloud;
                     int mx;
@@ -3690,7 +3887,8 @@ void GKOTHandleOriginInfo(struct mg_connection *conn, void *cbdata, const mg_req
         }
         pcln x = origin.x() + ox;
         pcln y = origin.y() + oy;
-        MapCloud* mc = getMapCloud((int)(x / mapTileWidth), (int)(y / mapTileHeight));
+        MapCloudRef mcl = acquireMapCloud((int)(x / mapTileWidth), (int)(y / mapTileHeight));
+        MapCloud *mc = mcl.cloud;
         if (mc) {
             int mx, my;
             mc->getMapCoords(x, y, &mx, &my);
@@ -3801,16 +3999,17 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
     std::vector<unsigned int> columns;
     */
 
-    MapCloud* cornerClouds[4];
+    MapCloudRef cornerClouds[4];
+
+    Vec bounds_tl;
+    Vec bounds_br;
+    Vec bounds_min;
+    Vec bounds_max;
 
     // Load source data
     switch (type)
     {
     case TYPE_RASTER: {
-        Vec bounds_tl;
-        Vec bounds_br;
-        Vec bounds_min;
-        Vec bounds_max;
         getCoordsFromBlock(req_origin, x, y, z, bounds_tl);
         getCoordsFromBlock(req_origin, x + sx, y + sy, z + sz, bounds_br);
         bounds_min = bounds_tl.cwiseMin(bounds_br);
@@ -3899,6 +4098,10 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
     {
         dtimer("painting");
+
+        MapCloud* corners[4];
+        setCornersFromRefs(cornerClouds, corners);
+
         for (int i = 0; i < width*height; i++) {
 
             int classification;
@@ -3908,10 +4111,10 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
             {
                 case TYPE_RASTER: {
                     Vec coords;
-                    int ox = i%sx;
-                    int oz = i/sx;
+                    int ox = i%width;
+                    int oz = i/width;
                     getCoordsFromBlock(req_origin, x + ox, y, z + oz, coords);
-                    rgb = MapCloud::getMapColor(cornerClouds, coords.x(), coords.y());
+                    rgb = MapCloud::getMapColor(corners, coords.x(), coords.y());
                     /*
                     rgb = -1;
                     int mx, my;
@@ -4062,7 +4265,7 @@ void GKOTHandleDashboardBoxes(struct mg_connection *conn, void *cbdata, const mg
     renderBoxesUsed(img);
     sendLiveImageHeader(conn, img.size);
     int status = mg_write(conn, img.data, img.size);
-    if (status == -1) plog("Debug box write error");
+    if (status == -1) plog("Unable to send dashboard boxes");
 }
 
 void GKOTHandleDashboardMapClouds(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
@@ -4072,7 +4275,7 @@ void GKOTHandleDashboardMapClouds(struct mg_connection *conn, void *cbdata, cons
     renderMapClouds(img);
     sendLiveImageHeader(conn, img.size);
     int status = mg_write(conn, img.data, img.size);
-    if (status == -1) plog("Debug box write error");
+    if (status == -1) plog("Unable to send dashboard map clouds");
 }
 
 void GKOTHandleDashboardStats(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
@@ -4240,7 +4443,8 @@ void GKOTHandleDebugBoxes(struct mg_connection *conn, void *cbdata, const mg_req
     mg_printf(conn, "<html><body>");
     mg_printf(conn, "Box debug!<pre>");
 
-    MapCloud *mc = getMapCloud(462, 101);
+    MapCloudRef mcl = acquireMapCloud(462, 101);
+    MapCloud *mc = mcl.cloud;
 
     int mw = mapTileWidth;
     int mh = mapTileHeight;
@@ -4361,7 +4565,8 @@ void GKOTHandleDebugHeight(struct mg_connection *conn, void *cbdata, const mg_re
     int mw = bdmrWidth;
     int mh = bdmrHeight;
 
-    MapCloud* mc = getMapCloud(388, 440);
+    MapCloudRef mcl = acquireMapCloud(388, 440);
+    MapCloud *mc = mcl.cloud;
 
     char *pixels = (char*)malloc(mw*mh * 3);
     assert(pixels);
@@ -4414,7 +4619,8 @@ void DOF84HandleDebug(struct mg_connection *conn, void *cbdata, const mg_request
     mg_printf(conn, "<html><body>");
     mg_printf(conn, "Hello!<pre>");
     
-    MapCloud *mc = getMapCloud(462, 101);
+    MapCloudRef mcl = acquireMapCloud(462, 101);
+    MapCloud *mc = mcl.cloud;
 
     int mw = mapTileWidth;
     int mh = mapTileHeight;
@@ -4427,7 +4633,7 @@ void DOF84HandleDebug(struct mg_connection *conn, void *cbdata, const mg_request
     Vec origin;
     origin << 462000, 101000, 0;
 
-    unsigned char *map = static_cast<unsigned char*>(mc->map.data);
+    unsigned char *map = static_cast<unsigned char*>(mc->getMap().data);
     assert(map);
 
     int *classMap = (int*)calloc(sizeof(int)*mw*mh, 1);
@@ -4589,7 +4795,7 @@ MainHandler(struct mg_connection *conn, void *cbdata)
     return 1;
 }
 
-enum  OptionIndex { UNKNOWN, HELP, PORT, WWW, LIDAR, MAP, BDMR, FISHNET, ORIGIN, CACHE };
+enum  OptionIndex { UNKNOWN, HELP, PORT, WWW, LIDAR, MAP, BDMR, FISHNET, ORIGIN, CACHE, MAP_MEMORY_LIMIT };
 const option::Descriptor usage[] =
 {
     { UNKNOWN, 0, "",  "",      option::Arg::None,     "USAGE: voxelserver [options] [root-path-to-gis-data]\n\n"
@@ -4602,7 +4808,8 @@ const option::Descriptor usage[] =
     { FISHNET, 0, "d", "fishnet", option::Arg::Optional, "  --fishnet, -d  \tPath to the fishnet database of sections." },
     { WWW,     0, "w", "www",     option::Arg::Optional, "  --www, -w  \tPath to the directory containing web files." },
     { ORIGIN,  0, "o", "origin",  option::Arg::Optional, "  --origin, -o  \tD96/TM coordinates of the box origin." },
-    { CACHE,    0, "c", "cache",  option::Arg::Optional, "  --cache, -c  \tCache hash size power, default 11 -> 2048 boxes ~ 8GiB of RAM." },
+    { CACHE,    0, "c", "cache",  option::Arg::Optional, "  --cache, -c  \tCache hash size power, default 14." },
+    { MAP_MEMORY_LIMIT, 0, "t", "map-memory", option::Arg::Optional, "  --map-memory, -t  \tMap memory limit in megabytes." },
     { UNKNOWN, 0, "",  "",        option::Arg::None,     "\n  Paths can be absolute or relative to the root path." },
     { UNKNOWN, 0, "",  "",        option::Arg::None,     "\nExamples:\n"
                                                          "  voxelserver\n"
@@ -4718,8 +4925,9 @@ int main(int argc, char const* argv[])
     webPath = getPathOption(&options[0], path, WWW, webRel);
     default_origin = getCoordsOption(&options[0], ORIGIN, default_origin);
     hashPower = options[CACHE] ? atoi(options[CACHE].arg) : defaultPower;
-
     vassert(hashPower > 0, "Hash power should be greater than zero: %d", hashPower);
+    mapMemoryLimit = options[MAP_MEMORY_LIMIT] ? atoi(options[MAP_MEMORY_LIMIT].arg) : defaultMapMemoryLimit;
+    vassert(mapMemoryLimit > 0, "Map memory limit should be greater than zero: %d", mapMemoryLimit);
 
     boxHash.resize(hashPower);
 
@@ -4734,6 +4942,7 @@ int main(int argc, char const* argv[])
     plog("Fishnet database: %s", fishnetPath.c_str());
     plog("Default origin coordinates: %g, %g, %g", default_origin.x(), default_origin.y(), default_origin.z());
     plog("Box cache size: %d", boxHash.size);
+    plog("Map memory limit: %d MB", mapMemoryLimit);
     
     bool dbLoaded = fishnet.load(fishnetPath.c_str());
     vassert(dbLoaded, "Unable to open fishnet database: %s", fishnetPath.c_str());
