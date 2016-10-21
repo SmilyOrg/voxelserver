@@ -19,6 +19,7 @@
 #include <locale>
 #include <random>
 #include <condition_variable>
+#include <thread>
 
 #include <sys/types.h>
 #include <sys/stat.h>
