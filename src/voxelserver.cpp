@@ -169,6 +169,11 @@ static const char* nanoflannAllPathFormat = "W:/gis/arso/nanoflann/gkot/b_35/D96
 static const char* nanoflannGroundPathFormat = "W:/gis/arso/nanoflann/otr/b_35/D96TM/TM_%d_%d.kdtree";
 */
 
+enum BoxType
+{
+    AMF = 1,
+    RAW = 2
+};
 
 enum Classification
 {
@@ -887,6 +892,13 @@ bool getParamBool(const char *queryString, size_t queryLength, const char *name)
     return ret < 0 || (ret > 0 && strncmp(param, "1", 1) != 0 && strncmp(param, "true", 4) != 0) ? false : true;
 }
 
+std::string getParamString(const char *queryString, size_t queryLength, const char *name, const char *defaultValue)
+{
+    char param[100];
+    int ret = mg_get_var(queryString, queryLength, name, param, sizeof(param));
+    return ret < 0 ? std::string(defaultValue) : std::string(param);
+}
+
 #define debugPrint(...) if (debug) mg_printf(conn, __VA_ARGS__)
 #if 1
 #define debug(format, ...) plog(format, __VA_ARGS__)
@@ -1046,7 +1058,7 @@ int readInt(const amf::u8 *p)
     return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
 }
 
-const amf::u8* readUIntVector(const amf::u8 *p, std::vector<unsigned int> &vec)
+amf::u8* readUIntVector(amf::u8 *p, std::vector<unsigned int> &vec)
 {
     size_t len = readUInt(p);
     p += 4;
@@ -1899,6 +1911,7 @@ struct BoxResult {
 
     bool valid;
 
+    BoxType type;
     Vec origin;
     long x, y, z;
     long sx, sy, sz;
@@ -2038,7 +2051,7 @@ public:
     void send(struct mg_connection *conn) {
         mg_printf(conn,
             "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/x-amf\r\n"
+            "Content-Type: application/octet-stream\r\n"
             NO_CACHE
             "\r\n"
         );
@@ -2182,6 +2195,32 @@ static void createColumnVis(unsigned int *columns, int sx, int sz, unsigned int 
 
 }
 
+static void createBlockLayerVis(unsigned int *cblocks, int sx, int sy, int sz, int y, unsigned int **pixels, int &width, int &height)
+{
+    int sxz = sx*sz;
+
+    int imagePadding = 4;
+    int blockPadding = 1;
+    int blockWidth = 10;
+    int blockHeight = 10;
+    int blockLayerPadding = 2;
+
+    width = imagePadding * 2 + blockWidth * sx;
+    height = imagePadding * 2 + (sz + blockLayerPadding) * blockHeight;
+    *pixels = (unsigned int*)calloc(width*height, 4);
+
+    for (int iz = 0; iz < sz; iz++) {
+        for (int ix = 0; ix < sx; ix++) {
+            int rx = imagePadding + ix*blockWidth;
+            int ry = imagePadding + (sz - 1 - iz)*blockHeight;
+            unsigned int bv = cblocks[ix + iz*sx + y*sxz];
+            unsigned int color = blockToColor[bv];
+            if (color) color |= 0xFF000000;
+            paintRect(*pixels, width, rx, ry, color, blockWidth - blockPadding, blockHeight - blockPadding);
+        }
+    }
+}
+
 static void createBlockVis(unsigned int *cblocks, int sx, int sy, int sz, unsigned int **pixels, int &width, int &height)
 {
     int sxz = sx*sz;
@@ -2189,7 +2228,7 @@ static void createBlockVis(unsigned int *cblocks, int sx, int sy, int sz, unsign
     int imagePadding = 4;
     int blockPadding = 1;
     int blockWidth = 10;
-    int blockHeight = 3;
+    int blockHeight = 8;
     int blockLayerPadding = 2;
 
     width = imagePadding * 2 + blockWidth * sx;
@@ -2333,7 +2372,7 @@ public:
         paintRect(static_cast<unsigned int*>(clouds.data), clouds.width, 0, 0, 0x33000000, clouds.width, clouds.height);
         for (int i = 0; i < records; i++) {
             auto &pair = coords[i];
-            paintMapCloud(clouds, pair.first / mapTileWidth, pair.second / mapTileHeight, 0xFFFFFFFF);
+            paintMapCloud(clouds, (int) (pair.first / mapTileWidth), (int) (pair.second / mapTileHeight), 0xFFFFFFFF);
         }
 
         return true;
@@ -2427,7 +2466,7 @@ static void renderMapCloudsRaw(MapImage &raw)
     int pixelHeight = height * tileSize;
 
     size_t pixelsLen = pixelWidth*pixelHeight;
-    raw.size = pixelsLen * 4;
+    raw.size = (int) pixelsLen * 4;
     unsigned int* pixels = static_cast<unsigned int*>(malloc(raw.size));
 
     raw.width = pixelWidth;
@@ -2708,9 +2747,11 @@ static void getBounds(const Vec &origin,
     bounds_max = bounds_tl.cwiseMax(bounds_br);
 }
 
+
+
 // Position and size of the requested box (all block coordinates)
 // Returns mutex locked box (unlock when done)
-BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, const long z, const long sx, long sy, const long sz, const bool debug = false) {
+BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, const long x, long y, const long z, const long sx, long sy, const long sz, const bool debug) {
 
     if (sx <= 0 || sy <= 0 || sz <= 0) return invalidBoxResult;
 
@@ -2755,6 +2796,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
 
     // Return cached if found
     if (!debug && br.valid &&
+        br.type == type &&
         br.origin == origin &&
         br.x == x && br.y == y && br.z == z &&
         br.sx == sx && br.sy == sy && br.sz == sz) {
@@ -2778,14 +2820,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
     br.sy = sy;
     br.sz = sz;
 
-    /*
-    br.bx = bx;
-    br.by = by;
-    br.bz = bz;
-    */
-
-    //br.jsonOpen();
-    br.exportOpen();
 
     // Precomputed strides
     int sxyz = sx*sy*sz;
@@ -2802,10 +2836,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
     // x -> z
     // y -> x
     // z -> y
-
-    //static const int lat_min = MININT, lat_max = MAXINT, lon_min = MININT, lon_max = MAXINT;
-    //static const int lat_min = 457, lat_max = 467, lon_min = 96, lon_max = 106;
-    //static const int lat_min = 462, lat_max = 462, lon_min = 101, lon_max = 101;
 
     {
         //             //
@@ -2828,7 +2858,7 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
         }
     }
 
-    bool shrink = true;
+    bool shrink = type == AMF;
     bool shrunk = false;
 
 
@@ -2892,10 +2922,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
             if (by < minHeight) minHeight = by;
             if (by > maxHeight) maxHeight = by;
             
-            //printf("%d ", p.classification);
-
-            //br.exportWrite(bx + 0.5, bz + 0.5, by + 0.5, -10);
-
             pointsUsed++;
         }
     }
@@ -3045,63 +3071,8 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
         blocks.resize(0);
     }
 
-    /*
-    for (size_t i = 0; i < all.getPointNum(); i++) {
-        Point &p = all.getPoint(i);
-
-        //br.exportWrite(p.x - bounds_tl.x(), p.y - bounds_tl.y(), p.z - bounds_tl.z(), -100);
-
-        //br.jsonWrite(p.x - bounds_tl.x(), p.y - bounds_tl.y(), p.z - bounds_tl.z(), -100);
-        //br.exportWrite(p.x - bounds_min.x(), p.y - bounds_min.y(), p.z - bounds_min.z(), -100);
-    }
-
-    for (size_t i = 0; i < ground.getPointNum(); i++) {
-        Point &p = ground.getPoint(i);
-
-        //br.exportWrite(p.x - bounds_min.x(), p.y - bounds_min.y(), p.z - bounds_min.z(), -101);
-        //br.jsonWrite(p.x - bounds_tl.x(), p.z - bounds_tl.z(), p.y - bounds_tl.y(), -101);
-    }
-    */
-
     unsigned int *cblocks = blocks.data();
     
-    /*
-    // Debug / testing
-    for (int i = 0; i < sxyz; i++) {
-        unsigned int &cv = cblocks[i];
-        int bx, by, bz;
-        getIndexBlock(i, bx, by, bz, sx, sz);
-
-        if (by == 5) {
-
-
-            Classification lidar = NONE;
-            for (int iy = 0; iy < sy; iy++) {
-                int ind = getBlockIndex(bx, iy, bz, sx, sxz);
-                Classification lid = static_cast<Classification>(cblocks[ind]);
-                if (lid != 0) lidar = lid;
-            }
-
-            Point cqp;
-            getCoordsFromBlock(bounds_min.data(), bx, by, bz, cqp);
-            getBlockFromCoords(origin.data(), cqp, bx, by, bz);
-            bz = 1000 - bz;
-            getCoordsFromBlock(origin.data(), bx, by, bz, cqp);
-
-            ClassificationQuery cq;
-            cq.x = cqp.x;
-            cq.y = cqp.y;
-            cq.lidar = lidar;
-            cq.flags = ClassificationFlags::DEFAULT;
-            cv = mapCloud->getSpecializedClassification(cq);
-        }
-        else {
-            cv = Classification::NONE;
-        }
-
-    }
-    //*/
-
     // Process points if any found
     if (pointsUsed > 0) {
 
@@ -3307,99 +3278,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
             all.build();
         }
 
-        /*
-        {
-            //                     //
-            // Slanted roof search //
-            //                     //
-            dtimer("slanted roof search");
-            for (int iz = 0; iz < sz; iz++) {
-                for (int ix = 0; ix < sx; ix++) {
-                    int bx = ix;
-                    int bz = iz;
-                    int colindex = getColumnIndex(bx, bz, sx);
-                    int by = columns[colindex];
-                    int index = getBlockIndex(bx, by, bz, sx, sxz);
-                    unsigned int &cv = cblocks[index];
-
-                    if (cv == Classification::BUILDING)
-                    ///
-                    {
-                        //dtimerStart(slanted_roof_search);
-                        // Slanted roof search
-                        Vec query_block_center;
-                        getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
-
-                        query_block_center += Vec::Constant(0.5);
-
-                        const pcln radius = 2;
-                        std::vector<std::pair<size_t, pcln> > indices;
-                        RadiusResultSet<pcln, size_t> points(radius*radius, indices);
-
-
-                        all.findRadius(query_block_center.data(), points);
-
-                        double slantAngle = 45;
-                        //double acceptedAngleDelta = 15;
-                        double dotThreshold = 0.40;
-
-                        size_t buildingPoints = 0;
-                        size_t slantedPoints = 0;
-                        //double avgAngle = 0;
-                        double avgDot = 0;
-                        for (size_t in = 0; in < points.size(); in++) {
-                            std::pair<size_t, pcln> pair = points.m_indices_dists[in];
-                            Point &p = all.getPoint(pair.first);
-                            if (p.classification != Classification::BUILDING) continue;
-                            buildingPoints++;
-                            Vec buildingPoint(p.x, p.y, p.z);
-                            Vec deltaVector = buildingPoint - query_block_center;
-                            deltaVector.normalize();
-                            double dot = deltaVector.dot(Eigen::Vector3d::UnitZ());
-                            avgDot += abs(dot);
-                            //double angle = acos(dot) * 180 / M_PI;
-                            //avgAngle += abs(angle);
-                            //if (abs(angle - slantAngle) < acceptedAngleDelta) slantedPoints++;
-                        }
-                        //avgAngle /= buildingPoints;
-                        avgDot /= buildingPoints;
-                        if (avgDot > dotThreshold) cv = Classification::BUILDING_ROOF_TILED_ORANGE;
-
-                        //dtimerStop(slanted_roof_search);
-                    }
-                    ///
-                }
-            }
-        }
-            //*/
-
-            
-        /*
-        std::vector<unsigned int> buildCols(sxz, 0);
-
-        for (int iz = 0; iz < sz; iz++) {
-            for (int ix = 0; ix < sx; ix++) {
-                int bx = ix;
-                int bz = iz;
-                int colindex = getColumnIndex(bx, bz, sx);
-                int by = columns[colindex];
-                int index = getBlockIndex(bx, by, bz, sx, sxz);
-                unsigned int &cv = cblocks[index];
-                if (cv == Classification::BUILDING) extendColumn(bx, by, bz, sx, buildCols.data());
-            }
-        }
-
-        for (int i = 0; i < sxyz; i++) {
-            unsigned int &cv = cblocks[i];
-            int bx, by, bz;
-            getIndexBlock(i, bx, by, bz, sx, sz);
-            int colindex = getColumnIndex(bx, bz, sx);
-            if (by > minHeight && by < buildCols[colindex]) cv = Classification::BUILDING;
-        }
-        */
-
-        //*/
-
 
         //*
         {
@@ -3468,14 +3346,10 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
                         unsigned int &cv = cblocks[index];
                         int c = cv & 0xFF;
 
-                        //br.jsonWrite(bx, by, bz, c);
-
                         if (std::find(filter.sources.begin(), filter.sources.end(), c) == filter.sources.end()) continue;
 
                         getCoordsFromBlock(bounds_tl, bx, by, bz, query_block_center);
                         query_block_center += block_center;
-
-                        //br.jsonWrite(query_block_center.x() - bounds_min.x(), query_block_center.y() - bounds_min.y(), query_block_center.z() - bounds_min.z(), -3);
 
                         const Classification target = filter.target;
                         const pcln radius = filter.radius;
@@ -3491,8 +3365,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
                         bool targetClosest = target == Classification::NONE;
                         pcln minDist = INFINITY;
                         size_t minIndex = -1;
-
-                        //br.jsonWrite(query_block_center.x() - bounds_min.x(), query_block_center.y() - bounds_min.y(), query_block_center.z() - bounds_min.z(), -3);
 
                         for (size_t in = 0; in < points.size(); in++) {
                             std::pair<size_t, pcln> pair = points.m_indices_dists[in];
@@ -3710,8 +3582,6 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
 
     }
 
-    //br.jsonClose();
-    br.exportClose();
 
     // Fix height so it's above the highest block
     maxHeight++;
@@ -3719,45 +3589,67 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
     // For an empty box, report as such
     if (maxHeight == 0) maxHeight = -2;
 
-    //plog("num %lld ", num);
-
     {
         dtimer("serialization");
 
         const int size_int = 4;
 
+        switch (type)
+        {
+        case AMF: {
+            amf::Serializer serializer;
+            serializer << amf::AmfVector<unsigned int>(blocks);
+            serializer << amf::AmfVector<unsigned int>(columns);
+
+            amf::v8 arrays = serializer.data();
+
+            size_t dataSize = 6 * size_int + arrays.size() + 1 * size_int;
+
+            void *data = br.getBuffer(dataSize);
+            vassert(br.dataSize == dataSize, "%d %d", (int)br.dataSize, (int)dataSize);
+            amf::u8 *p = static_cast<amf::u8*>(data);
+
+            writeUInt(p, worldHash); p += size_int;
+            writeInt(p, ry); p += size_int;
+            writeInt(p, rsy); p += size_int;
+            writeInt(p, bx); p += size_int;
+            writeInt(p, by); p += size_int;
+            writeInt(p, bz); p += size_int;
+            memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
+            writeInt(p, maxHeight); p += size_int;
+
+            break;
+        }
+
+        case RAW: {
+
+            // Compress into length + ints
+            size_t dataSize = size_int * (
+                3 +
+                1 +
+                1 + blocks.size() +
+                1 + columns.size()
+            );
+
+            void *data = br.getBuffer(dataSize);
+            amf::u8 *p = static_cast<amf::u8*>(data);
+
+            writeInt(p, bx); p += size_int;
+            writeInt(p, by); p += size_int;
+            writeInt(p, bz); p += size_int;
+            writeInt(p, maxHeight); p += size_int;
+
+            // Compress into length + ints
+            p = writeUIntVector(p, blocks);
+            p = writeUIntVector(p, columns);
+
+            break;
+        }
+
+        }
+
         //*
-        amf::Serializer serializer;
-        serializer << amf::AmfVector<unsigned int>(blocks);
-        serializer << amf::AmfVector<unsigned int>(columns);
-
-        amf::v8 arrays = serializer.data();
-
-        size_t dataSize = 6 * size_int + arrays.size() + 1 * size_int;
         //*/
-
-        /* Compress into length + ints
-        size_t dataSize =
-            6 * size_int + 
-            (1 + blocks.size() + 1 + columns.size())*size_int + 
-            1 * size_int;
-        //*/
-
-        void *data = br.getBuffer(dataSize);
-        vassert(br.dataSize == dataSize, "%d %d", (int)br.dataSize, (int)dataSize);
-        amf::u8 *p = static_cast<amf::u8*>(data);
-
-        writeUInt(p, worldHash); p += size_int;
-        writeInt(p, ry); p += size_int;
-        writeInt(p, rsy); p += size_int;
-        writeInt(p, bx); p += size_int;
-        writeInt(p, by); p += size_int;
-        writeInt(p, bz); p += size_int;
-        memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
-        // Compress into length + ints
-        //p = writeUIntVector(p, blocks);
-        //p = writeUIntVector(p, columns);
-        writeInt(p, maxHeight); p += size_int;
 
         bool compress = maxHeight >= 0;
 
@@ -3773,6 +3665,47 @@ BoxResult& getBox(const uint32_t worldHash, Vec origin, const long x, long y, co
     return br;
 }
 
+static void sendRawDebug(struct mg_connection *conn, BoxResult &br, const int sx, const int sy, const int sz) {
+    br.decompress();
+
+    amf::u8 *p = static_cast<amf::u8*>(br.data);
+
+    const int size_int = 4;
+
+    int bx = readInt(p); p += size_int;
+    int by = readInt(p); p += size_int;
+    int bz = readInt(p); p += size_int;
+    mg_printf(conn, "box coords: %d %d %d\n", bx, by, bz);
+
+    int maxHeight = readInt(p); p += size_int;
+    mg_printf(conn, "max height: %d\n", maxHeight);
+
+    std::vector<unsigned int> blocks;
+    std::vector<unsigned int> columns;
+
+    p = readUIntVector(p, blocks);
+    p = readUIntVector(p, columns);
+
+    unsigned int *pixels;
+    int width;
+    int height;
+
+    unsigned int *cblocks = blocks.data();
+
+    for (int iy = sy - 1; iy >= 0; iy--) {
+        createBlockLayerVis(cblocks, sx, sy, sz, iy, &pixels, width, height);
+        vassert(pixels, "Unable to create block layer vis");
+        printImage(conn, pixels, width, height);
+        free(pixels);
+        mg_printf(conn, "&#92;_ y: %d\n", iy);
+    }
+
+    //createBlockVis(cblocks, sx, sy, sz, &pixels, width, height);
+    //printImage(conn, pixels, width, height);
+
+    br.removeRedundant();
+}
+
 void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_info *info)
 {
     Vec origin;
@@ -3784,6 +3717,8 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     long sy = 512;
     long sz = 1;
     bool debug = false;
+    std::string format;
+    BoxType type = BoxType::AMF;
 
     plogScope();
 
@@ -3809,6 +3744,10 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     sy = getParamLong(qs, ql, "sy");
     sz = getParamLong(qs, ql, "sz");
     debug = getParamBool(qs, ql, "debug");
+    format = getParamString(qs, ql, "format", "amf");
+
+    if (format == "amf") type = BoxType::AMF;
+    if (format == "raw") type = BoxType::RAW;
 
     debugPrint("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
     debugPrint("<html><body>");
@@ -3822,7 +3761,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("sy    : %d\n", sy);
     debugPrint("sz / h: %d\n", sz);
 
-    BoxResult &br = getBox(worldHash, origin, x, y, z, sx, sy, sz, debug);
+    BoxResult &br = getBox(type, worldHash, origin, x, y, z, sx, sy, sz, false);
 
     if (&br == &invalidBoxResult) {
         printf("Invalid box %ld %ld %ld %ld %ld %ld\n", x, y, z, sx, sy, sz);
@@ -3832,7 +3771,11 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     {
         dtimer("send");
-        br.send(conn);
+        if (type == BoxType::RAW && debug) {
+            sendRawDebug(conn, br, sx, sy, sz);
+        } else {
+            br.send(conn);
+        }
         br.mutex.unlock();
         ++boxesSent;
     }
@@ -4033,7 +3976,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
         dtimer("deserialization");
 
-        BoxResult &br = getBox(0, default_origin, x, y, z, sx, sy, sz, true);
+        BoxResult &br = getBox(BoxType::AMF, 0, default_origin, x, y, z, sx, sy, sz, true);
 
         br.decompress();
 
@@ -4105,7 +4048,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
         for (int i = 0; i < width*height; i++) {
 
-            int classification;
+            int classification = Classification::NONE;
             unsigned int rgb = 0xFF000000;
 
             switch (type)
@@ -4126,9 +4069,11 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
                 }; break;
 
                 default:
-                    int h = columns->at(i);
-                    int topBlockIndex = i + h*sxz;
-                    classification = blocks->at(topBlockIndex);
+                    if (blocks->size() > 0) {
+                        int h = columns->at(i);
+                        int topBlockIndex = i + h*sxz;
+                        classification = blocks->at(topBlockIndex);
+                    }
             }
 
             /*
@@ -4645,6 +4590,7 @@ void DOF84HandleDebug(struct mg_connection *conn, void *cbdata, const mg_request
         Point &p = all.getPoint(i);
         int bx, by, bz;
         getBlockFromCoords(origin, p, bx, by, bz);
+        if (bx < 0 || bz < 0 || bx >= mw || bz >= mh) continue;
         //int index = bx + bz*mw;
         int index = getBlockIndex(bx, 0, bz, mw, mw*mh);
         int v = classMap[index];
@@ -4858,7 +4804,13 @@ int main(int argc, char const* argv[])
 
     {
         memset(blockToColor, 0, sizeof(blockToColor));
+        blockToColor[0x001] = 0x898989;
+        blockToColor[0x002] = 0x71a346;
+        blockToColor[0x003] = 0x775339;
+        blockToColor[0x009] = 0x597bec;
+        blockToColor[0x012] = 0x378c12;
         blockToColor[0x023] = 0xE0E0E0;
+        blockToColor[0x112] = 0x317a11;
         blockToColor[0x123] = 0xEB833C;
         blockToColor[0x223] = 0xC65DD0;
         blockToColor[0x323] = 0x5980D0;
