@@ -68,6 +68,20 @@ For example, providing `x=64&y=0&z=32` will return a chunk that has its bottom s
 
 Defaults to `false`. If `true`, the server doesn't return the box in binary format, but rather outputs HTML information about the chunk suitable for viewing in a browser, including all the provided parameters and an exploded view of all the chunk layers.
 
+### `transform=[true|false]`
+
+Defaults to `false`. If `true`, the server transforms the point height right after loading it using the following integrated function.
+
+```cpp
+if (z <= threshold) {
+    z *= scaleBelow;
+} else {
+    z = (z - threshold) * scaleAbove;
+}
+```
+
+`z` is the height of the point above sea level, `threshold` is the inflection point of the height scaling and `scaleBelow` and `scaleAbove` are the scalars of the two different regions. These parameters are configurable via the `--transform-threshold`, `--transform-scale-below` and `--transform-scale-above` command line switches and are global across all requests that use `transform=true`. The default values scale all points in the interval `[0, 500]` to `[0, 200]` and `(500, 2864]` to `(200, 256]`.
+
 ### Example
 
 `/gkot/box?format=raw&debug=true&tmx=462000&tmy=101000&tmz=290&x=64&y=0&z=32&sx=16&sy=128&sz=16`
