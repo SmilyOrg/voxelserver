@@ -95,6 +95,13 @@ static const int defaultPower = 14;
 static const int defaultMapMemoryLimit = 1000;
 static int mapMemoryLimit;
 
+static const double defaultTransformThreshold = 500.0;
+static const double defaultTransformScaleBelow = 0.4;
+static const double defaultTransformScaleAbove = 56.0 / (2864.0 - 500.0);
+static double transformThreshold;
+static double transformScaleBelow;
+static double transformScaleAbove;
+
 static const char* nameFormat = "{0}_{1}";
 
 static const char* defaultPort = "8888";
@@ -1200,6 +1207,15 @@ class PointCloudIO
         return true;
     }
 
+    inline void transformPoint(Point &p)
+    {
+        if (p.z <= transformThreshold) {
+            p.z *= transformScaleBelow;
+        } else {
+            p.z = (p.z - transformThreshold) * transformScaleAbove;
+        }
+    }
+
 public:
     PointCloudIO() : reader(nullptr) {}
 
@@ -1233,7 +1249,7 @@ public:
         reader = nullptr;
     }
 
-    void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN)
+    void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN, bool transform = false)
     {
         std::lock_guard<std::mutex> lock(mutex);
 
@@ -1247,6 +1263,7 @@ public:
         
         Point p;
         while (readPoint(p)) {
+            if (transform) transformPoint(p);
             all->addPoint(p);
             if (p.classification == Classification::GROUND) ground->addPoint(p);
         }
@@ -1499,7 +1516,7 @@ public:
         access = mapCloudAccess++;
     }
 
-    void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN) {
+    void load(PointCloud *all, PointCloud *ground, double min_x = NAN, double min_y = NAN, double max_x = NAN, double max_y = NAN, bool transform = false) {
         int readerIndex = -1;
         PointCloudIO *reader;
 
@@ -1518,7 +1535,7 @@ public:
         }
 
         reader->open(lidarPath.c_str());
-        reader->load(all, ground, min_x, min_y, max_x, max_y);
+        reader->load(all, ground, min_x, min_y, max_x, max_y, transform);
         reader->close();
 
         {
@@ -1922,6 +1939,8 @@ struct BoxResult {
     BoxCompression compression;
     void *compressed;
     size_t compressedSize;
+
+    bool transformed;
 
     /*
     // TODO: Put stuff below into a supplementary class and observe mem usage
@@ -2751,7 +2770,7 @@ static void getBounds(const Vec &origin,
 
 // Position and size of the requested box (all block coordinates)
 // Returns mutex locked box (unlock when done)
-BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, const long x, long y, const long z, const long sx, long sy, const long sz, const bool debug) {
+BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, const long x, long y, const long z, const long sx, long sy, const long sz, const bool debug, const bool transform) {
 
     if (sx <= 0 || sy <= 0 || sz <= 0) return invalidBoxResult;
 
@@ -2799,7 +2818,8 @@ BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, cons
         br.type == type &&
         br.origin == origin &&
         br.x == x && br.y == y && br.z == z &&
-        br.sx == sx && br.sy == sy && br.sz == sz) {
+        br.sx == sx && br.sy == sy && br.sz == sz &&
+        br.transformed == transform) {
         return br;
     }
 
@@ -2819,7 +2839,7 @@ BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, cons
     br.sx = sx;
     br.sy = sy;
     br.sz = sz;
-
+    br.transformed = transform;
 
     // Precomputed strides
     int sxyz = sx*sy*sz;
@@ -2888,7 +2908,7 @@ BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, cons
         for (int i = 0; i < 4; i++) {
             MapCloud* mc = cornerClouds[i].cloud;
             if (!mc) continue;
-            mc->load(&all, &ground, bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y());
+            mc->load(&all, &ground, bounds_min.x(), bounds_min.y(), bounds_max.x(), bounds_max.y(), transform);
         }
     }
 
@@ -3717,6 +3737,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     long sy = 512;
     long sz = 1;
     bool debug = false;
+    bool transform = false;
     std::string format;
     BoxType type = BoxType::AMF;
 
@@ -3745,6 +3766,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     sz = getParamLong(qs, ql, "sz");
     debug = getParamBool(qs, ql, "debug");
     format = getParamString(qs, ql, "format", "amf");
+    transform = getParamBool(qs, ql, "transform");
 
     if (format == "amf") type = BoxType::AMF;
     if (format == "raw") type = BoxType::RAW;
@@ -3761,7 +3783,7 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("sy    : %d\n", sy);
     debugPrint("sz / h: %d\n", sz);
 
-    BoxResult &br = getBox(type, worldHash, origin, x, y, z, sx, sy, sz, false);
+    BoxResult &br = getBox(type, worldHash, origin, x, y, z, sx, sy, sz, false, transform);
 
     if (&br == &invalidBoxResult) {
         printf("Invalid box %ld %ld %ld %ld %ld %ld\n", x, y, z, sx, sy, sz);
@@ -3976,7 +3998,7 @@ void GKOTHandleTile(struct mg_connection *conn, void *cbdata, const mg_request_i
 
         dtimer("deserialization");
 
-        BoxResult &br = getBox(BoxType::AMF, 0, default_origin, x, y, z, sx, sy, sz, true);
+        BoxResult &br = getBox(BoxType::AMF, 0, default_origin, x, y, z, sx, sy, sz, true, false);
 
         br.decompress();
 
@@ -4742,7 +4764,23 @@ MainHandler(struct mg_connection *conn, void *cbdata)
     return 1;
 }
 
-enum  OptionIndex { UNKNOWN, HELP, PORT, WWW, LIDAR, MAP, BDMR, FISHNET, ORIGIN, CACHE, MAP_MEMORY_LIMIT };
+enum OptionIndex { 
+    UNKNOWN,
+    HELP,
+    PORT,
+    WWW,
+    LIDAR,
+    MAP,
+    BDMR,
+    FISHNET,
+    ORIGIN,
+    CACHE,
+    MAP_MEMORY_LIMIT,
+    TRANSFORM_THRESHOLD,
+    TRANSFORM_SCALE_BELOW,
+    TRANSFORM_SCALE_ABOVE,
+};
+
 const option::Descriptor usage[] =
 {
     { UNKNOWN, 0, "",  "",      option::Arg::None,     "USAGE: voxelserver [options] [root-path-to-gis-data]\n\n"
@@ -4757,6 +4795,9 @@ const option::Descriptor usage[] =
     { ORIGIN,  0, "o", "origin",  option::Arg::Optional, "  --origin, -o  \tD96/TM coordinates of the box origin." },
     { CACHE,    0, "c", "cache",  option::Arg::Optional, "  --cache, -c  \tCache hash size power, default 14." },
     { MAP_MEMORY_LIMIT, 0, "t", "map-memory", option::Arg::Optional, "  --map-memory, -t  \tMap memory limit in megabytes." },
+    { TRANSFORM_THRESHOLD, 0, "", "transform-threshold", option::Arg::Optional, "  --transform-threshold  \tHeight threshold of the point input transform." },
+    { TRANSFORM_SCALE_BELOW, 0, "", "transform-scale-below", option::Arg::Optional, "  --transform-scale-below  \tHeight scale below the transform threshold." },
+    { TRANSFORM_SCALE_ABOVE, 0, "", "transform-scale-above", option::Arg::Optional, "  --transform-scale-above  \tHeight scale above the transform threshold." },
     { UNKNOWN, 0, "",  "",        option::Arg::None,     "\n  Paths can be absolute or relative to the root path." },
     { UNKNOWN, 0, "",  "",        option::Arg::None,     "\nExamples:\n"
                                                          "  voxelserver\n"
@@ -4799,7 +4840,7 @@ static Vec getCoordsOption(const option::Option* options, OptionIndex index, Vec
 int main(int argc, char const* argv[])
 {
     plog("");
-    plog("--- voxelserver ---");
+    plog("--- voxelserver 1.1.0 ---");
     plog("");
 
     {
@@ -4881,6 +4922,10 @@ int main(int argc, char const* argv[])
     vassert(hashPower > 0, "Hash power should be greater than zero: %d", hashPower);
     mapMemoryLimit = options[MAP_MEMORY_LIMIT] ? atoi(options[MAP_MEMORY_LIMIT].arg) : defaultMapMemoryLimit;
     vassert(mapMemoryLimit > 0, "Map memory limit should be greater than zero: %d", mapMemoryLimit);
+    transformThreshold = options[TRANSFORM_THRESHOLD] ? atof(options[TRANSFORM_THRESHOLD].arg) : defaultTransformThreshold;
+    transformScaleBelow = options[TRANSFORM_SCALE_BELOW] ? atof(options[TRANSFORM_SCALE_BELOW].arg) : defaultTransformScaleBelow;
+    transformScaleAbove = options[TRANSFORM_SCALE_ABOVE] ? atof(options[TRANSFORM_SCALE_ABOVE].arg) : defaultTransformScaleAbove;
+
 
     boxHash.resize(hashPower);
 
@@ -4896,6 +4941,7 @@ int main(int argc, char const* argv[])
     plog("Default origin coordinates: %g, %g, %g", default_origin.x(), default_origin.y(), default_origin.z());
     plog("Box cache size: %d", boxHash.size);
     plog("Map memory limit: %d MB", mapMemoryLimit);
+    plog("Transform: threshold %g scale below %g scale above %g", transformThreshold, transformScaleBelow, transformScaleAbove);
     
     bool dbLoaded = fishnet.load(fishnetPath.c_str());
     vassert(dbLoaded, "Unable to open fishnet database: %s", fishnetPath.c_str());
