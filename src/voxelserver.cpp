@@ -2232,7 +2232,7 @@ static void createBlockLayerVis(unsigned int *cblocks, int sx, int sy, int sz, i
         for (int ix = 0; ix < sx; ix++) {
             int rx = imagePadding + ix*blockWidth;
             int ry = imagePadding + (sz - 1 - iz)*blockHeight;
-            unsigned int bv = cblocks[ix + iz*sx + y*sxz];
+            unsigned int bv = cblocks ? cblocks[ix + iz*sx + y*sxz] : 0;
             unsigned int color = blockToColor[bv];
             if (color) color |= 0xFF000000;
             paintRect(*pixels, width, rx, ry, color, blockWidth - blockPadding, blockHeight - blockPadding);
@@ -4840,7 +4840,7 @@ static Vec getCoordsOption(const option::Option* options, OptionIndex index, Vec
 int main(int argc, char const* argv[])
 {
     plog("");
-    plog("--- voxelserver 1.1.0 ---");
+    plog("--- voxelserver 1.1.1 ---");
     plog("");
 
     {
