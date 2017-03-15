@@ -1080,6 +1080,30 @@ amf::u8* readUIntVector(amf::u8 *p, std::vector<unsigned int> &vec)
 
 
 
+static inline int getBlockIndex(const int bx, const int by, const int bz, const int sx, const int sxz)
+{
+    return bx + bz*sx + by*sxz;
+}
+
+static inline void getIndexBlock(const int index, int &bx, int &by, int &bz, const int sx, const int sz)
+{
+    bx = index % sx;
+    bz = (index / sx) % sz;
+    by = index / (sx*sz);
+}
+
+static inline int getColumnIndex(const int bx, const int bz, const int sx)
+{
+    return bx + bz*sx;
+}
+
+static inline void getIndexColumn(const int index, int &bx, int &bz, const int sx)
+{
+    bx = index % sx;
+    bz = index / sx;
+}
+
+
 
 struct Point
 {
@@ -2083,6 +2107,143 @@ public:
         removeRedundant();
     }
 
+    void write(
+        const std::vector<unsigned int> &blocks,
+        const std::vector<unsigned int> &columns,
+        const int bx, const int by, const int bz, const int maxHeight,
+        const unsigned int worldHash = 0, const int ry = 0, const int rsy = 0
+    ) {
+        const int size_int = 4;
+
+        switch (type)
+        {
+        case AMF: {
+            amf::Serializer serializer;
+            serializer << amf::AmfVector<unsigned int>(blocks);
+            serializer << amf::AmfVector<unsigned int>(columns);
+
+            amf::v8 arrays = serializer.data();
+
+            size_t dataSize = 6 * size_int + arrays.size() + 1 * size_int;
+
+            void *data = getBuffer(dataSize);
+            vassert(dataSize == dataSize, "%d %d", (int)dataSize, (int)dataSize);
+            amf::u8 *p = static_cast<amf::u8*>(data);
+
+            writeUInt(p, worldHash); p += size_int;
+            writeInt(p, ry); p += size_int;
+            writeInt(p, rsy); p += size_int;
+            writeInt(p, bx); p += size_int;
+            writeInt(p, by); p += size_int;
+            writeInt(p, bz); p += size_int;
+            memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
+            writeInt(p, maxHeight); p += size_int;
+
+            break;
+        }
+
+        case RAW: {
+
+            // Compress into length + ints
+            size_t dataSize = size_int * (
+                3 +
+                1 +
+                1 + blocks.size() +
+                1 + columns.size()
+                );
+
+            void *data = getBuffer(dataSize);
+            amf::u8 *p = static_cast<amf::u8*>(data);
+
+            writeInt(p, bx); p += size_int;
+            writeInt(p, by); p += size_int;
+            writeInt(p, bz); p += size_int;
+            writeInt(p, maxHeight); p += size_int;
+
+            // Compress into length + ints
+            p = writeUIntVector(p, blocks);
+            p = writeUIntVector(p, columns);
+
+            break;
+        }
+
+        }
+    }
+
+    void read(
+        std::vector<unsigned int> &blocks,
+        std::vector<unsigned int> &columns,
+        int &bx, int &by, int &bz, int &maxHeight
+    ) {
+        decompress();
+        switch (type) {
+        case BoxType::RAW: {
+            amf::u8 *p = static_cast<amf::u8*>(data);
+
+            const int size_int = 4;
+
+            bx = readInt(p); p += size_int;
+            by = readInt(p); p += size_int;
+            bz = readInt(p); p += size_int;
+
+            maxHeight = readInt(p); p += size_int;
+
+            p = readUIntVector(p, blocks);
+            p = readUIntVector(p, columns);
+
+            break;
+        }
+        default: vassert(false, "Unsupported type");
+        }
+        removeRedundant();
+    }
+
+    BoxResult* getCropped(long cax, long cay, long caz, long cbx, long cby, long cbz) {
+        vassert(type == BoxType::RAW, "Unsupported type for crop");
+        BoxResult* c = new BoxResult();
+        c->valid = valid;
+        c->type = type;
+        c->x = cax;
+        c->y = cay;
+        c->z = caz;
+        c->sx = cbx - cax;
+        c->sy = cby - cay;
+        c->sz = cbz - caz;
+        
+        decompress();
+
+        std::vector<unsigned int> blocks;
+        std::vector<unsigned int> columns;
+        int bx, by, bz, maxHeight;
+
+        read(blocks, columns, bx, by, bz, maxHeight);
+
+        int sxz = sx * sz;
+        int crop_sxyz = c->sx * c->sy * c->sz;
+        int crop_sxz = c->sx * c->sz;
+
+        std::vector<unsigned int> crop_blocks(crop_sxyz, 0);
+        std::vector<unsigned int> crop_columns(crop_sxz, 0);
+
+        for (int i = 0; i < crop_sxyz; i++) {
+            int x, y, z;
+            getIndexBlock(i, x, y, z, c->sx, c->sz);
+            int index = getBlockIndex(c->x + x, c->y + y, c->z + z, sx, sxz);
+            crop_blocks[i] = blocks[index];
+        }
+
+        for (int i = 0; i < crop_sxz; i++) {
+            int x, z;
+            getIndexColumn(i, x, z, c->sx);
+            int index = getColumnIndex(c->x + x, c->z + z, sx);
+            crop_columns[i] = columns[index];
+        }
+
+        c->write(crop_blocks, crop_columns, bx, by, bz, maxHeight);
+
+        return c;
+    }
+
     void exportOpen() {
 #if EXPORT_BOX_DEBUG
 #if EXPORT_BOX_JSON
@@ -2583,24 +2744,6 @@ MapCloudRef acquireMapCloud(int lat, int lon)
 
 
 
-
-static inline int getBlockIndex(int bx, int by, int bz, int sx, int sxz)
-{
-    return bx + bz*sx + by*sxz;
-}
-
-static inline void getIndexBlock(int index, int &bx, int &by, int &bz, int sx, int sz)
-{
-    bx = index % sx;
-    bz = (index / sx) % sz;
-    by = index / (sx*sz);
-}
-
-static inline int getColumnIndex(int bx, int bz, int sx)
-{
-    return bx + bz*sx;
-}
-
 static void getBlockFromCoords(Vec reference, Vec coords, int &bx, int &by, int &bz)
 {
     Vec diff = coords - reference;
@@ -2831,6 +2974,7 @@ BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, cons
 
     // Not found in cache, update cached params
     if (!br.valid) ++boxesCached;
+    br.type = type;
     br.valid = false;
     br.origin = origin;
     br.x = x;
@@ -3611,62 +3755,7 @@ BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, cons
 
     {
         dtimer("serialization");
-
-        const int size_int = 4;
-
-        switch (type)
-        {
-        case AMF: {
-            amf::Serializer serializer;
-            serializer << amf::AmfVector<unsigned int>(blocks);
-            serializer << amf::AmfVector<unsigned int>(columns);
-
-            amf::v8 arrays = serializer.data();
-
-            size_t dataSize = 6 * size_int + arrays.size() + 1 * size_int;
-
-            void *data = br.getBuffer(dataSize);
-            vassert(br.dataSize == dataSize, "%d %d", (int)br.dataSize, (int)dataSize);
-            amf::u8 *p = static_cast<amf::u8*>(data);
-
-            writeUInt(p, worldHash); p += size_int;
-            writeInt(p, ry); p += size_int;
-            writeInt(p, rsy); p += size_int;
-            writeInt(p, bx); p += size_int;
-            writeInt(p, by); p += size_int;
-            writeInt(p, bz); p += size_int;
-            memcpy(p, arrays.data(), arrays.size()); p += arrays.size();
-            writeInt(p, maxHeight); p += size_int;
-
-            break;
-        }
-
-        case RAW: {
-
-            // Compress into length + ints
-            size_t dataSize = size_int * (
-                3 +
-                1 +
-                1 + blocks.size() +
-                1 + columns.size()
-            );
-
-            void *data = br.getBuffer(dataSize);
-            amf::u8 *p = static_cast<amf::u8*>(data);
-
-            writeInt(p, bx); p += size_int;
-            writeInt(p, by); p += size_int;
-            writeInt(p, bz); p += size_int;
-            writeInt(p, maxHeight); p += size_int;
-
-            // Compress into length + ints
-            p = writeUIntVector(p, blocks);
-            p = writeUIntVector(p, columns);
-
-            break;
-        }
-
-        }
+        br.write(blocks, columns, bx, by, bz, maxHeight, worldHash, ry, rsy);
 
         //*
         //*/
@@ -3686,25 +3775,14 @@ BoxResult& getBox(const BoxType type, const uint32_t worldHash, Vec origin, cons
 }
 
 static void sendRawDebug(struct mg_connection *conn, BoxResult &br, const int sx, const int sy, const int sz) {
-    br.decompress();
-
-    amf::u8 *p = static_cast<amf::u8*>(br.data);
-
-    const int size_int = 4;
-
-    int bx = readInt(p); p += size_int;
-    int by = readInt(p); p += size_int;
-    int bz = readInt(p); p += size_int;
-    mg_printf(conn, "box coords: %d %d %d\n", bx, by, bz);
-
-    int maxHeight = readInt(p); p += size_int;
-    mg_printf(conn, "max height: %d\n", maxHeight);
-
     std::vector<unsigned int> blocks;
     std::vector<unsigned int> columns;
+    int bx, by, bz, maxHeight;
 
-    p = readUIntVector(p, blocks);
-    p = readUIntVector(p, columns);
+    br.read(blocks, columns, bx, by, bz, maxHeight);
+
+    mg_printf(conn, "box coords: %d %d %d\n", bx, by, bz);
+    mg_printf(conn, "max height: %d\n", maxHeight);
 
     unsigned int *pixels;
     int width;
@@ -3736,6 +3814,9 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     long sx = 1;
     long sy = 512;
     long sz = 1;
+    long cax, cay, caz;
+    long cbx, cby, cbz;
+    bool cropping = false;
     bool debug = false;
     bool transform = false;
     std::string format;
@@ -3764,9 +3845,28 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     sx = getParamLong(qs, ql, "sx");
     sy = getParamLong(qs, ql, "sy");
     sz = getParamLong(qs, ql, "sz");
+    cax = getParamLong(qs, ql, "cax", MINLONG);
+    cay = getParamLong(qs, ql, "cay", MINLONG);
+    caz = getParamLong(qs, ql, "caz", MINLONG);
+    cbx = getParamLong(qs, ql, "cbx", MAXLONG);
+    cby = getParamLong(qs, ql, "cby", MAXLONG);
+    cbz = getParamLong(qs, ql, "cbz", MAXLONG);
     debug = getParamBool(qs, ql, "debug");
     format = getParamString(qs, ql, "format", "amf");
     transform = getParamBool(qs, ql, "transform");
+
+    cropping =
+        cax != MINLONG || cay != MINLONG || caz != MINLONG ||
+        cbx != MAXLONG || cby != MAXLONG || cbz != MAXLONG;
+
+    if (cropping) {
+        cax = std::max(0L, std::min(sx, cax));
+        cay = std::max(0L, std::min(sy, cay));
+        caz = std::max(0L, std::min(sz, caz));
+        cbx = std::max(cax, std::min(sx, cbx));
+        cby = std::max(cay, std::min(sy, cby));
+        cbz = std::max(caz, std::min(sz, cbz));
+    }
 
     if (format == "amf") type = BoxType::AMF;
     if (format == "raw") type = BoxType::RAW;
@@ -3782,7 +3882,11 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
     debugPrint("sx / w: %d\n", sx);
     debugPrint("sy    : %d\n", sy);
     debugPrint("sz / h: %d\n", sz);
-
+    if (cropping) {
+        debugPrint("crop from: %4d %4d %4d\n", cax, cay, caz);
+        debugPrint("crop to:   %4d %4d %4d\n", cbx, cby, cbz);
+    }
+    
     BoxResult &br = getBox(type, worldHash, origin, x, y, z, sx, sy, sz, false, transform);
 
     if (&br == &invalidBoxResult) {
@@ -3793,11 +3897,18 @@ void GKOTHandleBox(struct mg_connection *conn, void *cbdata, const mg_request_in
 
     {
         dtimer("send");
-        if (type == BoxType::RAW && debug) {
-            sendRawDebug(conn, br, sx, sy, sz);
-        } else {
-            br.send(conn);
+
+        BoxResult *sender = &br;
+
+        if (type == BoxType::RAW && cropping) {
+            sender = br.getCropped(cax, cay, caz, cbx, cby, cbz);
         }
+        if (type == BoxType::RAW && debug) {
+            sendRawDebug(conn, *sender, sender->sx, sender->sy, sender->sz);
+        } else {
+            sender->send(conn);
+        }
+        if (sender != &br) delete sender;
         br.mutex.unlock();
         ++boxesSent;
     }
@@ -4840,7 +4951,7 @@ static Vec getCoordsOption(const option::Option* options, OptionIndex index, Vec
 int main(int argc, char const* argv[])
 {
     plog("");
-    plog("--- voxelserver 1.1.1 ---");
+    plog("--- voxelserver 1.2.0 ---");
     plog("");
 
     {

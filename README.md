@@ -64,6 +64,14 @@ Location of the chunk in world block coordinates. You can use these parameters i
 
 For example, providing `x=64&y=0&z=32` will return a chunk that has its bottom south-west block positioned at `64, 0, 32` in block coordinates. Querying with the same parameters except for location being `x=48&y=0&z=32`, `x=80&y=0&z=32`, `x=64&y=0&z=16` or `x=64&y=0&z=48` and with a horizontal chunk size of 16m×16m will return the neighboring chunks so that combined they form a system of tiles. This is useful for dynamic loading and unloading of parts of the world.
 
+### `cax=[integer]&cay=[integer]&caz=[integer]&cbx=[integer]&cby=[integer]&cbz=[integer]`
+
+Chunk cropping in chunk-local coordinates. `cax`, `cay`, `caz` define the lower boundary of the crop, `cbx`, `cby`, `cbz` define the upper boundary. All of the coordinates are clamped to a minimum of 0 and a maximum of `sx`, `sy`, `sz`. If the upper boundary is lower than the lower boundary, it is clamped to the lower boundary.
+
+Only supported with the `raw` output format for now.
+
+For example, providing `cax=16&cbx=32` will return a cropped version of the original box on the x axis extending from 16 to 32.
+
 ### `debug=[true|false]`
 
 Defaults to `false`. If `true`, the server doesn't return the box in binary format, but rather outputs HTML information about the chunk suitable for viewing in a browser, including all the provided parameters and an exploded view of all the chunk layers.
